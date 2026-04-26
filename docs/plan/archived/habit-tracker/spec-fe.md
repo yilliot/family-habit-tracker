@@ -1,5 +1,9 @@
 # Habit Tracker — Frontend Specification
 
+> **STATUS: CLOSED — Shipped 2026-04-26**
+> 5 pages, newspaper aesthetic (paper/ink/terracotta), optimistic ticking, celebration overlay, all forms. Three intentional omissions: instructions micro-strip, named footer signatures, and portrait stacked view (horizontal-scroll fallback used instead).
+> See [CLOSURE.md](./CLOSURE.md) for full delivery notes.
+
 > Date: 2026-04-26
 > Idea: docs/plan/habit-tracker/idea.md
 

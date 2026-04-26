@@ -1,5 +1,9 @@
 # Habit Tracker — Platform Specification
 
+> **STATUS: CLOSED — Shipped 2026-04-26**
+> 19 named routes, 10 controllers, 10 Form Requests, Wayfinder generation, flash sharing. Post-deploy fix: removed `Route::redirect('settings')` from routes/settings.php to resolve a route-cache collision that redirected `/settings` to login on production.
+> See [CLOSURE.md](./CLOSURE.md) for full delivery notes.
+
 > Date: 2026-04-26
 > Idea: docs/plan/habit-tracker/idea.md
 

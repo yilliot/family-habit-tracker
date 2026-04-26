@@ -1,5 +1,9 @@
 # Habit Tracker - Idea
 
+> **STATUS: CLOSED — Shipped 2026-04-26**
+> Full feature delivered: 6 models, 19 routes, 5 pages, newspaper aesthetic, optimistic ticking, multi-sprint carry-forward rewards. Production route-cache bug fixed post-deploy.
+> See [CLOSURE.md](./CLOSURE.md) for full delivery notes.
+
 > Brainstormed on: 2026-04-26
 
 ## The Problem

@@ -1,5 +1,9 @@
 # Habit Tracker — Backend Specification
 
+> **STATUS: CLOSED — Shipped 2026-04-26**
+> All 6 models, migrations, factories, 15 actions, repository, and 44 PHPUnit tests delivered. Key deviation: `habits.sprint_participant_id` uses `nullOnDelete` (not cascade) to preserve tick history when a participant is removed.
+> See [CLOSURE.md](./CLOSURE.md) for full delivery notes.
+
 > Date: 2026-04-26
 > Idea: docs/plan/habit-tracker/idea.md
 
