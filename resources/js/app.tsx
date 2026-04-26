@@ -4,9 +4,18 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { initializeTheme } from '@/hooks/use-appearance';
 import AppLayout from '@/layouts/app-layout';
 import AuthLayout from '@/layouts/auth-layout';
+import HabitTrackerLayout from '@/layouts/habit-tracker-layout';
 import SettingsLayout from '@/layouts/settings/layout';
 
-const appName = import.meta.env.VITE_APP_NAME || 'Laravel';
+const appName = import.meta.env.VITE_APP_NAME || 'Family Habit Tracker';
+
+const HABIT_TRACKER_PAGES = new Set([
+    'tracker/Show',
+    'history/Index',
+    'history/Show',
+    'totals/Show',
+    'settings/Index',
+]);
 
 createInertiaApp({
     title: (title) => (title ? `${title} - ${appName}` : appName),
@@ -14,6 +23,8 @@ createInertiaApp({
         switch (true) {
             case name === 'welcome':
                 return null;
+            case HABIT_TRACKER_PAGES.has(name):
+                return HabitTrackerLayout;
             case name.startsWith('auth/'):
                 return AuthLayout;
             case name.startsWith('settings/'):
@@ -32,7 +43,7 @@ createInertiaApp({
         );
     },
     progress: {
-        color: '#4B5563',
+        color: '#c94a2b',
     },
 });
 
