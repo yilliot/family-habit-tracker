@@ -226,3 +226,8 @@ Use Wayfinder to generate TypeScript functions for Laravel routes. Import from `
 - IMPORTANT: Activate `inertia-react-development` when working with Inertia React client-side patterns.
 
 </laravel-boost-guidelines>
+
+## Deployment
+
+- Production runs on an EC2 server (nginx + PHP 8.3-FPM, SQLite) at https://family-habit-tracker.axon.commun.cloud.
+- Server access details, deploy commands, and the typical deploy sequence live in `DEPLOYMENT.md` (gitignored — not committed). Read it before deploying.
