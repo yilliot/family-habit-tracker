@@ -8,6 +8,7 @@ import {
     monthLabel,
     parseIsoDate,
 } from '@/components/habit-tracker/format';
+import DeductPointsButton from '@/components/habit-tracker/forms/deduct-points-button';
 import ticks from '@/routes/ticks';
 import type {
     HtHabit,
@@ -245,6 +246,12 @@ export default function SprintGrid({
                                                 ? ` / ${p.active_reward.cost}`
                                                 : ' pts'}
                                         </span>
+                                        {!readOnly && (
+                                            <DeductPointsButton
+                                                sprintParticipantId={p.id}
+                                                personName={p.person.name}
+                                            />
+                                        )}
                                     </td>
                                     <td
                                         className="habit"
@@ -291,6 +298,12 @@ export default function SprintGrid({
                                                     ? ` / ${p.active_reward.cost}`
                                                     : ' pts'}
                                             </span>
+                                            {!readOnly && (
+                                                <DeductPointsButton
+                                                    sprintParticipantId={p.id}
+                                                    personName={p.person.name}
+                                                />
+                                            )}
                                         </td>
                                     )}
                                     <td className="habit">

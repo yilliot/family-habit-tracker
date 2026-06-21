@@ -60,6 +60,14 @@ class SprintParticipant extends Model
     }
 
     /**
+     * @return HasMany<PointAdjustment, $this>
+     */
+    public function adjustments(): HasMany
+    {
+        return $this->hasMany(PointAdjustment::class);
+    }
+
+    /**
      * @param  Builder<SprintParticipant>  $query
      */
     public function scopeOrdered(Builder $query): void

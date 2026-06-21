@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\HabitTracker\AdjustmentController;
 use App\Http\Controllers\HabitTracker\HabitController;
 use App\Http\Controllers\HabitTracker\HistoryController;
 use App\Http\Controllers\HabitTracker\PersonController;
@@ -44,3 +45,6 @@ Route::delete('rewards/{reward}', [RewardController::class, 'destroy'])->name('r
 
 Route::post('sprint-participants/{sprintParticipant}/active-reward', [SprintParticipantController::class, 'updateReward'])
     ->name('sprint-participants.update-reward');
+
+Route::post('sprint-participants/{sprintParticipant}/adjustments', [AdjustmentController::class, 'store'])
+    ->name('adjustments.store');

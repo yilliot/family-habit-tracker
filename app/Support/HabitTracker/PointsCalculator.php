@@ -3,6 +3,7 @@
 namespace App\Support\HabitTracker;
 
 use App\Models\Person;
+use App\Models\PointAdjustment;
 use App\Models\Reward;
 use App\Models\SprintParticipant;
 use App\Models\Tick;
@@ -11,11 +12,12 @@ use App\Models\Tick;
  * Computes derived points balances on demand. Never persists totals.
  *
  * Lifetime balance for a person = (total ticks ever earned across all habits,
- * including soft-deleted habits) − (sum of cost of all achieved rewards).
+ * including soft-deleted habits) − (sum of cost of all achieved rewards)
+ * + (sum of all manual point adjustments, which are negative for deductions).
  *
  * Sprint-scoped balance for a participant = carry_forward_balance + (ticks
  * inside this participant's habits) − (cost of rewards achieved AT-OR-AFTER
- * this sprint's start).
+ * this sprint's start) + (this participant's manual point adjustments).
  */
 class PointsCalculator
 {
@@ -40,7 +42,16 @@ class PointsCalculator
             ->whereNotNull('achieved_at')
             ->sum('cost');
 
-        return (int) $earned - $spent;
+        $adjusted = (int) PointAdjustment::query()
+            ->whereIn(
+                'sprint_participant_id',
+                fn ($q) => $q->from('sprint_participants')
+                    ->select('id')
+                    ->where('person_id', $person->id)
+            )
+            ->sum('amount');
+
+        return (int) $earned - $spent + $adjusted;
     }
 
     /**
@@ -69,6 +80,10 @@ class PointsCalculator
             ->where('achieved_at', '>=', $sprintStartedAt)
             ->sum('cost');
 
-        return (int) $participant->carry_forward_balance + (int) $earnedInSprint - $spentDuringOrAfterSprintStart;
+        $adjusted = (int) PointAdjustment::query()
+            ->where('sprint_participant_id', $participant->id)
+            ->sum('amount');
+
+        return (int) $participant->carry_forward_balance + (int) $earnedInSprint - $spentDuringOrAfterSprintStart + $adjusted;
     }
 }
