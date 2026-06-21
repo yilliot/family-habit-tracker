@@ -49,10 +49,11 @@ export default function DeductPointsButton({
         <>
             <button
                 type="button"
-                className="ht-btn ht-btn-ghost mt-1 text-[10px]"
+                className="mt-1 inline-flex items-center text-[10px] tracking-wide text-[var(--ink-3)] underline-offset-2 transition-colors hover:text-[var(--terracotta)] hover:underline"
                 onClick={() => setOpen(true)}
+                aria-label={`Deduct points from ${personName}`}
             >
-                − Deduct
+                − deduct
             </button>
             {open && (
                 <div
