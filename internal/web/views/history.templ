@@ -1,0 +1,56 @@
+package views
+
+import "github.com/el/family-habit-tracker/internal/service"
+
+// HistoryIndex lists finished sprints, newest first.
+templ HistoryIndex(page Page, entries []service.HistoryEntry) {
+	@Layout(page) {
+		<div class="ht-narrow ht-stack">
+			<h2 class="ht-section-title">Past sprints</h2>
+			if len(entries) == 0 {
+				@EmptyState(
+					"No archived sprints yet",
+					"Your first sprint is still in progress — finish it from Settings and it will be filed here.",
+				) {
+					<a class="ht-btn ht-btn-terracotta" href="/">Back to tracker</a>
+				}
+			} else {
+				<ul class="ht-stack-sm">
+					for _, entry := range entries {
+						<li class="ht-progress-card ht-row-between">
+							<div>
+								<div class="ht-card-title">
+									{ FormatRange(entry.Sprint.StartDate, entry.Sprint.EndDate) }
+								</div>
+								<div class="ht-note">{ HistorySummary(entry) }</div>
+								if len(entry.Achievers) > 0 {
+									<div class="ht-note" style="color:var(--ink-2);margin-top:4px">
+										{ AchieverSummary(entry.Achievers) }
+									</div>
+								}
+							</div>
+							<a class="ht-btn ht-btn-ghost" href={ templ.SafeURL("/history/" + i64toa(entry.Sprint.ID)) }>
+								View
+							</a>
+						</li>
+					}
+				</ul>
+			}
+		</div>
+	}
+}
+
+// HistoryShow renders one archived sprint as a read-only ledger.
+templ HistoryShow(page Page, grid service.Grid) {
+	@Layout(page) {
+		<div class="ht-stack">
+			<div class="ht-row-between ht-no-print">
+				<a class="ht-eyebrow" href="/history">← Back to history</a>
+				<button type="button" class="ht-btn ht-btn-ghost" onclick="window.print()">Print this sprint</button>
+			</div>
+			@ProgressStrip(grid)
+			@SprintGrid(grid)
+			@sprintFoot(grid)
+		</div>
+	}
+}

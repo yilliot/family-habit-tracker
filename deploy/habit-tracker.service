@@ -1,0 +1,34 @@
+# systemd unit for the family habit tracker. deploy/install.sh fills in the @PLACEHOLDERS@ from
+# the settings at its top and installs this as /etc/systemd/system/habit-tracker.service.
+[Unit]
+Description=Family Habit Tracker
+After=network.target
+
+[Service]
+User=habit-tracker
+Group=habit-tracker
+ExecStart=/opt/habit-tracker/bin/habit-tracker \
+    -db /var/lib/habit-tracker/habits.sqlite \
+    -addr @ADDR@ \
+    -tz @TZ@ \
+    -backup-dir /var/lib/habit-tracker/backups
+WorkingDirectory=/var/lib/habit-tracker
+StateDirectory=habit-tracker
+StateDirectoryMode=0750
+Restart=always
+RestartSec=2
+
+# The app reads its own binary and writes only its state directory; fence it to that.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

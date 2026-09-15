@@ -1,0 +1,243 @@
+package views
+
+import "github.com/el/family-habit-tracker/internal/service"
+
+// SprintGrid renders a sprint as the people-by-days ledger.
+//
+// The grid is a real table: one row per habit, banded into a block per person
+// by the person-start / person-end borders. An archived sprint renders the same
+// markup with every cell disabled.
+templ SprintGrid(grid service.Grid) {
+	<div class="ht-scroll-x ht-grid-wrap">
+		<table class="ht-grid">
+			<caption class="ht-sr">
+				{ "Habit ledger for " + FormatRange(grid.Sprint.StartDate, grid.Sprint.EndDate) }
+			</caption>
+			<colgroup>
+				<col class="col-person"/>
+				<col class="col-habit"/>
+				for range grid.Days {
+					<col class="col-day"/>
+				}
+				<col class="col-reward"/>
+			</colgroup>
+			<thead>
+				<tr class="ht-month-row">
+					<th colspan="2"></th>
+					for _, group := range grid.MonthGroups {
+						<th colspan={ itoa(group.Span) } class="ht-month-named">{ group.Label }</th>
+					}
+					<th></th>
+				</tr>
+				<tr class="ht-date-row">
+					<th class="ht-corner ht-corner-person" scope="col">Person</th>
+					<th class="ht-corner ht-corner-habit" scope="col">Habit</th>
+					for _, day := range grid.Days {
+						<th
+							scope="col"
+							class={ "ht-day-head", templ.KV("weekend", day.IsWeekend),
+								templ.KV("month-start", day.IsMonthStart), templ.KV("today", day.IsToday) }
+							data-today-col={ boolAttr(day.IsToday) }
+						>
+							<span class="dow">{ DowInitial(day.Date) }</span>
+							<span class="dnum">{ itoa(DayNumber(day.Date)) }</span>
+							<span class="ht-sr">{ FormatLong(day.Date) }</span>
+						</th>
+					}
+					<th class="ht-reward-head" scope="col">Reward · 奖励</th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, participant := range grid.Participants {
+					@participantRows(grid, participant)
+				}
+			</tbody>
+		</table>
+	</div>
+}
+
+// participantRows renders one person's block of the grid.
+templ participantRows(grid service.Grid, participant service.GridParticipant) {
+	if len(participant.Habits) == 0 {
+		<tr class="person-start person-end">
+			<td class="person">
+				@personCell(grid, participant)
+			</td>
+			<td class="habit" colspan={ itoa(len(grid.Days)) }>
+				<span class="ht-note">No habits yet — add some in Settings.</span>
+			</td>
+			@rewardCell(participant, 1)
+		</tr>
+	} else {
+		for index, habit := range participant.Habits {
+			<tr
+				class={ templ.KV("person-start", index == 0),
+					templ.KV("person-end", index == len(participant.Habits)-1) }
+			>
+				if index == 0 {
+					<td class="person" rowspan={ itoa(len(participant.Habits)) }>
+						@personCell(grid, participant)
+					</td>
+				}
+				<td class="habit">
+					<span class="ht-habit-num">{ itoa(index + 1) }.</span>
+					<span class="ht-habit-name">{ habit.Habit.Name }</span>
+					<span class="ht-habit-count">{ itoa(habit.Count) }</span>
+				</td>
+				for _, day := range grid.Days {
+					@dayCell(grid, habit, day)
+				}
+				if index == 0 {
+					@rewardCell(participant, len(participant.Habits))
+				}
+			</tr>
+		}
+	}
+}
+
+// personCell prints a name, their balance against the goal, and the deduction
+// affordance that opens the points dialog.
+templ personCell(grid service.Grid, participant service.GridParticipant) {
+	<span class="ht-person-name">{ participant.Person.Name }</span>
+	@BalanceLabel(participant, false)
+	if !grid.ReadOnly {
+		<button
+			type="button"
+			class="ht-deduct ht-no-print"
+			data-modal-open={ "deduct-" + i64toa(participant.Participant.ID) }
+		>
+			{ "− deduct" }
+			<span class="ht-sr">{ " points from " + participant.Person.Name }</span>
+		</button>
+	}
+}
+
+// BalanceLabel is swapped on its own after a tick, so a completed cell updates
+// the running total without re-rendering the row. With oob set it carries
+// hx-swap-oob, which is how it reaches the page as part of a tick response.
+templ BalanceLabel(participant service.GridParticipant, oob bool) {
+	<span
+		class="ht-person-balance"
+		id={ "bal-" + i64toa(participant.Participant.ID) }
+		if oob {
+			hx-swap-oob="true"
+		}
+	>{ BalanceText(participant) }</span>
+}
+
+// dayCell renders one (habit, day) square.
+//
+// The cell is a real form around a real submit button: without JavaScript it
+// posts and the page re-renders, and with it htmx swaps just this cell. Cells
+// outside the sprint, in the future, or in an archived sprint are disabled
+// rather than merely styled, so they cannot be activated by keyboard either.
+templ dayCell(grid service.Grid, habit service.GridHabit, day service.GridDay) {
+	{{
+		ticked := habit.IsTicked(day.ISO)
+		locked := grid.ReadOnly || day.IsFuture
+	}}
+	<td
+		class={ "day", templ.KV("weekend", day.IsWeekend), templ.KV("sun", day.IsSunday),
+			templ.KV("month-start", day.IsMonthStart), templ.KV("today-col", day.IsToday) }
+		data-today-col={ boolAttr(day.IsToday) }
+	>
+		<form
+			method="post"
+			action="/ticks"
+			hx-post="/ticks"
+			hx-target="this"
+			hx-swap="outerHTML"
+			hx-disabled-elt="find button"
+		>
+			<input type="hidden" name="habit_id" value={ i64toa(habit.Habit.ID) }/>
+			<input type="hidden" name="tick_date" value={ day.ISO }/>
+			<button
+				type="submit"
+				class="ht-cell-btn"
+				data-ticked={ boolAttr(ticked) }
+				data-future={ boolAttr(day.IsFuture) }
+				data-readonly={ boolAttr(grid.ReadOnly) }
+				aria-pressed={ boolAttr(ticked) }
+				aria-label={ cellLabel(habit, day, ticked) }
+				disabled?={ locked }
+			></button>
+		</form>
+	</td>
+}
+
+// rewardCell prints the goal a person is earning toward and their progress bar.
+templ rewardCell(participant service.GridParticipant, rowSpan int) {
+	<td class="reward reward-top" rowspan={ itoa(rowSpan) }>
+		@RewardPanel(participant, false)
+	</td>
+}
+
+// RewardPanel is swapped on its own after a tick so the progress bar advances
+// without re-rendering the grid.
+templ RewardPanel(participant service.GridParticipant, oob bool) {
+	<div
+		class="ht-reward-inner"
+		id={ "rw-" + i64toa(participant.Participant.ID) }
+		if oob {
+			hx-swap-oob="true"
+		}
+	>
+		if participant.ActiveReward != nil {
+			<div>
+				<div class="ht-eyebrow">Reward</div>
+				<div class="ht-reward-name">{ participant.ActiveReward.Name }</div>
+				<div class="ht-reward-meta">
+					{ RewardMetaText(participant) }
+					if participant.ActiveReward.IsAchieved() {
+						<span class="ht-reward-done"> · achieved</span>
+					}
+				</div>
+			</div>
+			<div class="ht-progress-track">
+				<div class="ht-progress-fill" style={ widthStyle(participant.Percent()) }></div>
+			</div>
+		} else {
+			<div class="ht-note">No reward set — points accrue as surplus.</div>
+		}
+	</div>
+}
+
+// ProgressStrip is the at-a-glance summary above the grid: one card per person
+// showing how close they are to their goal.
+templ ProgressStrip(grid service.Grid) {
+	if len(grid.Participants) > 0 {
+		<section class="ht-progress-strip" aria-label="Progress toward each person's reward">
+			for _, participant := range grid.Participants {
+				@ProgressCard(participant, false)
+			}
+		</section>
+	}
+}
+
+// ProgressCard is one person's summary, swapped on its own after a tick.
+templ ProgressCard(participant service.GridParticipant, oob bool) {
+	<article
+		class="ht-progress-card"
+		id={ "ps-" + i64toa(participant.Participant.ID) }
+		if oob {
+			hx-swap-oob="true"
+		}
+	>
+		<div class="ht-progress-head">
+			<h3 class="ht-card-title">{ participant.Person.Name }</h3>
+			<span class="ht-note">{ itoa(participant.Percent()) + "%" }</span>
+		</div>
+		<div class="ht-progress-figures">
+			<span class="ht-num">{ itoa(participant.Balance) }</span>
+			if participant.ActiveReward != nil {
+				<span class="ht-note">{ "/ " + itoa(participant.ActiveReward.Cost) }</span>
+				<span class="ht-note">{ participant.ActiveReward.Name }</span>
+			} else {
+				<a class="ht-note ht-link" href="/settings?tab=rewards">Pick a reward</a>
+			}
+		</div>
+		<div class="ht-progress-track">
+			<div class="ht-progress-fill" style={ widthStyle(participant.Percent()) }></div>
+		</div>
+	</article>
+}

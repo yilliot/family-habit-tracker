@@ -1,0 +1,461 @@
+package views
+
+import "github.com/el/family-habit-tracker/internal/service"
+
+// SettingsView carries the settings page state, including which tab is open
+// and which person the celebration deep-link wants highlighted.
+type SettingsView struct {
+	Data     service.SettingsData
+	Tab      string
+	FocusID  int64
+}
+
+// settingsTabs is the tab bar, in print order.
+var settingsTabs = []NavItem{
+	{Label: "Current sprint", Href: "sprint"},
+	{Label: "People", Href: "people"},
+	{Label: "Rewards", Href: "rewards"},
+}
+
+// Settings is the family-meeting page: who is taking part, what they are
+// tracking, and what they are working toward.
+//
+// Tabs are links rather than local state, so a tab is bookmarkable and the
+// "pick next reward" link from a celebration lands on exactly the right panel.
+templ Settings(page Page, view SettingsView) {
+	@Layout(page) {
+		<div class="ht-wide">
+			<div class="ht-tabs ht-divider-strong" style="border-top:0">
+				for _, tab := range settingsTabs {
+					<a
+						class="ht-tab"
+						href={ templ.SafeURL("/settings?tab=" + tab.Href) }
+						data-active={ boolAttr(view.Tab == tab.Href) }
+					>
+						{ tab.Label }
+					</a>
+				}
+			</div>
+			<div class="ht-divider-strong" style="padding-top:24px">
+				switch view.Tab {
+					case "people":
+						@peopleTab(view)
+					case "rewards":
+						@rewardsTab(view)
+					default:
+						@sprintTab(view)
+				}
+			</div>
+		</div>
+	}
+}
+
+/* ——— Current sprint ——————————————————————————————————————————— */
+
+templ sprintTab(view SettingsView) {
+	if view.Data.ActiveGrid == nil {
+		@startSprintForm(view)
+	} else {
+		@activeSprintPanel(view, *view.Data.ActiveGrid)
+	}
+}
+
+templ activeSprintPanel(view SettingsView, grid service.Grid) {
+	<section class="ht-stack">
+		<header class="ht-row-between">
+			<div>
+				<h2 class="ht-section-title">Active sprint</h2>
+				<p class="ht-note">{ SprintRangeText(grid.Sprint.StartDate, grid.Sprint.EndDate) }</p>
+			</div>
+			@ConfirmButton(
+				"end-sprint",
+				"End sprint",
+				"End the current sprint?",
+				"Ending the sprint dated "+FormatRange(grid.Sprint.StartDate, grid.Sprint.EndDate)+" makes it read-only. Unspent points carry into your next sprint.",
+				"End sprint",
+				"/sprints/"+i64toa(grid.Sprint.ID)+"/end",
+				false,
+			)
+		</header>
+		for _, participant := range grid.Participants {
+			<article class="ht-progress-card ht-stack-sm">
+				<h3 class="ht-card-title">{ participant.Person.Name }</h3>
+				@activeRewardPicker(view, participant)
+				<div>
+					<h4 class="ht-label">Habits</h4>
+					<ul class="ht-list">
+						if len(participant.Habits) == 0 {
+							<li class="ht-note">No habits yet.</li>
+						}
+						for _, habit := range participant.Habits {
+							<li class="ht-row-between">
+								<form
+									method="post"
+									action={ templ.SafeURL("/habits/" + i64toa(habit.Habit.ID)) }
+									class="ht-row"
+									style="flex:1 1 240px"
+								>
+									<input
+										class="ht-input"
+										type="text"
+										name="name"
+										value={ habit.Habit.Name }
+										maxlength="80"
+										required
+										aria-label="Habit name"
+										style="flex:1 1 160px"
+									/>
+									<button type="submit" class="ht-btn ht-btn-ghost">Save</button>
+								</form>
+								@ConfirmButton(
+									"del-habit-"+i64toa(habit.Habit.ID),
+									"Remove",
+									"Remove this habit?",
+									"Existing ticks stay in the totals; the habit just disappears from the grid.",
+									"Remove",
+									"/habits/"+i64toa(habit.Habit.ID)+"/delete",
+									true,
+								)
+							</li>
+						}
+					</ul>
+					<form
+						method="post"
+						action={ templ.SafeURL("/participants/" + i64toa(participant.Participant.ID) + "/habits") }
+						class="ht-row ht-divider"
+						style="padding-top:12px;margin-top:8px"
+					>
+						<input
+							class="ht-input"
+							type="text"
+							name="name"
+							maxlength="80"
+							required
+							placeholder="Add a habit…"
+							aria-label={ "Add a habit for " + participant.Person.Name }
+							style="flex:1 1 200px"
+						/>
+						<button type="submit" class="ht-btn ht-btn-ghost">Add habit</button>
+					</form>
+				</div>
+			</article>
+		}
+		if len(view.Data.AvailableForSprint) > 0 {
+			<div class="ht-divider-strong ht-stack-sm" style="padding-top:24px">
+				<h3 class="ht-card-title">Add someone mid-sprint</h3>
+				<p class="ht-note">They join with the points they have already banked.</p>
+				<form
+					method="post"
+					action={ templ.SafeURL("/sprints/" + i64toa(grid.Sprint.ID) + "/participants") }
+					class="ht-stack-sm"
+				>
+					<div class="ht-field-row">
+						<label class="ht-field">
+							<span class="ht-label">Person</span>
+							<select class="ht-input" name="person_id" required>
+								for _, person := range view.Data.AvailableForSprint {
+									<option value={ i64toa(person.ID) }>{ person.Name }</option>
+								}
+							</select>
+						</label>
+						<button type="submit" class="ht-btn ht-btn-terracotta">Add to sprint</button>
+					</div>
+					<label class="ht-field">
+						<span class="ht-label">Habits — one per line</span>
+						<textarea class="ht-input" name="habits" rows="3" placeholder="Read 20 minutes&#10;Tidy room"></textarea>
+					</label>
+				</form>
+			</div>
+		}
+	</section>
+}
+
+// activeRewardPicker swaps which goal a participant is earning toward.
+templ activeRewardPicker(view SettingsView, participant service.GridParticipant) {
+	<form
+		method="post"
+		action={ templ.SafeURL("/participants/" + i64toa(participant.Participant.ID) + "/active-reward") }
+		class="ht-field-row"
+	>
+		<label class="ht-field">
+			<span class="ht-label">Working toward</span>
+			<select class="ht-input" name="reward_id">
+				<option value="">No reward — bank the points</option>
+				for _, entry := range view.Data.RewardsByPerson {
+					if entry.Person.ID == participant.Person.ID {
+						for _, reward := range entry.Rewards {
+							if !reward.IsAchieved() {
+								<option
+									value={ i64toa(reward.ID) }
+									selected?={ participant.ActiveReward != nil && participant.ActiveReward.ID == reward.ID }
+								>
+									{ RewardOptionText(reward.Name, reward.Cost) }
+								</option>
+							}
+						}
+					}
+				}
+			</select>
+		</label>
+		<button type="submit" class="ht-btn ht-btn-ghost">Update</button>
+	</form>
+}
+
+// startSprintForm opens a new sprint. It arrives pre-filled with the previous
+// sprint's roster and habits, because a family meeting usually adjusts the last
+// sprint rather than inventing a new one.
+templ startSprintForm(view SettingsView) {
+	<section class="ht-stack">
+		<div>
+			<h2 class="ht-section-title">Start a new sprint</h2>
+			<p class="ht-note">Carried over from your last sprint — adjust anything, then begin.</p>
+		</div>
+		if len(view.Data.NextSprint.Participants) == 0 {
+			@EmptyState("Add a person first", "You need at least one family member before a sprint can start.") {
+				<a class="ht-btn ht-btn-terracotta" href="/settings?tab=people">Add family</a>
+			}
+		} else {
+			<form method="post" action="/sprints" class="ht-stack">
+				<div class="ht-field-row">
+					<label class="ht-field">
+						<span class="ht-label">Starts</span>
+						<input
+							class="ht-input"
+							type="date"
+							name="start_date"
+							value={ ISODate(view.Data.NextSprint.StartDate) }
+							required
+						/>
+					</label>
+					<label class="ht-field">
+						<span class="ht-label">Ends</span>
+						<input
+							class="ht-input"
+							type="date"
+							name="end_date"
+							value={ ISODate(view.Data.NextSprint.EndDate) }
+							required
+						/>
+					</label>
+				</div>
+				for _, candidate := range view.Data.NextSprint.Participants {
+					@startSprintPerson(candidate)
+				}
+				<div>
+					<button type="submit" class="ht-btn ht-btn-terracotta">Begin sprint</button>
+				</div>
+			</form>
+		}
+	</section>
+}
+
+templ startSprintPerson(candidate service.NextSprintParticipant) {
+	{{ id := i64toa(candidate.Person.ID) }}
+	<article class="ht-progress-card ht-stack-sm">
+		<div class="ht-row-between">
+			<label class="ht-check">
+				<input type="checkbox" name="person_ids" value={ id } checked?={ candidate.Included }/>
+				<span class="ht-card-title">{ candidate.Person.Name }</span>
+			</label>
+			<span class="ht-note">{ CarriedInText(candidate.Balance) }</span>
+		</div>
+		<label class="ht-field">
+			<span class="ht-label">Habits — one per line</span>
+			<textarea class="ht-input" name={ "habits_" + id } rows="4">{ habitLines(candidate.Habits) }</textarea>
+		</label>
+		<fieldset style="border:0;padding:0;margin:0">
+			<legend class="ht-label">Reward</legend>
+			<div class="ht-row">
+				if candidate.ActiveReward != nil {
+					<label class="ht-check">
+						<input type="radio" name={ "reward_mode_" + id } value="keep_current" checked/>
+						<span>{ KeepRewardText(candidate.ActiveReward.Name, candidate.ActiveReward.Cost) }</span>
+					</label>
+				} else {
+					<label class="ht-check">
+						<input type="radio" name={ "reward_mode_" + id } value="new"/>
+						<span>New reward</span>
+					</label>
+					<label class="ht-check">
+						<input type="radio" name={ "reward_mode_" + id } value="none" checked/>
+						<span>None for now</span>
+					</label>
+				}
+			</div>
+			if candidate.ActiveReward == nil {
+				<div class="ht-field-row" style="margin-top:8px">
+					<label class="ht-field">
+						<span class="ht-label">Reward name</span>
+						<input class="ht-input" type="text" name={ "reward_name_" + id } maxlength="80" placeholder="Lego Minecraft"/>
+					</label>
+					<label class="ht-field">
+						<span class="ht-label">Cost in points</span>
+						<input class="ht-input" type="number" name={ "reward_cost_" + id } min="1" max="9999" placeholder="250"/>
+					</label>
+				</div>
+			}
+		</fieldset>
+	</article>
+}
+
+/* ——— People ———————————————————————————————————————————————————— */
+
+templ peopleTab(view SettingsView) {
+	<section class="ht-stack">
+		<h2 class="ht-section-title">Family</h2>
+		<form method="post" action="/people" class="ht-field-row">
+			<label class="ht-field">
+				<span class="ht-label">Name</span>
+				<input class="ht-input" type="text" name="name" maxlength="50" required placeholder="爸爸"/>
+			</label>
+			<button type="submit" class="ht-btn ht-btn-terracotta">Add person</button>
+		</form>
+		<ul class="ht-list ht-divider" style="padding-top:8px">
+			if len(view.Data.People) == 0 {
+				<li class="ht-note">Add your first family member above.</li>
+			}
+			for _, person := range view.Data.People {
+				<li class="ht-row-between">
+					<form
+						method="post"
+						action={ templ.SafeURL("/people/" + i64toa(person.ID)) }
+						class="ht-row"
+						style="flex:1 1 280px"
+					>
+						<input
+							class="ht-input"
+							type="text"
+							name="name"
+							value={ person.Name }
+							maxlength="50"
+							required
+							aria-label="Name"
+							style="flex:1 1 140px"
+						/>
+						<input
+							class="ht-input"
+							type="number"
+							name="display_order"
+							value={ itoa(person.DisplayOrder) }
+							min="0"
+							aria-label="Display order"
+							style="width:72px;flex:0 0 72px"
+						/>
+						<button type="submit" class="ht-btn ht-btn-ghost">Save</button>
+						if person.IsArchived() {
+							<span class="ht-badge">archived</span>
+						}
+					</form>
+					if !person.IsArchived() {
+						@ConfirmButton(
+							"del-person-"+i64toa(person.ID),
+							"Remove",
+							"Remove this person?",
+							"Removing "+person.Name+" keeps every tick and reward they have earned. They can be added to a future sprint at any time.",
+							"Remove",
+							"/people/"+i64toa(person.ID)+"/delete",
+							true,
+						)
+					}
+				</li>
+			}
+		</ul>
+	</section>
+}
+
+/* ——— Rewards ——————————————————————————————————————————————————— */
+
+templ rewardsTab(view SettingsView) {
+	<section class="ht-stack">
+		<h2 class="ht-section-title">Rewards</h2>
+		if len(view.Data.RewardsByPerson) == 0 {
+			@EmptyState("No family yet", "Add someone on the People tab and you can set their first reward here.") {
+				<a class="ht-btn ht-btn-terracotta" href="/settings?tab=people">Add family</a>
+			}
+		}
+		for _, entry := range view.Data.RewardsByPerson {
+			<article
+				class="ht-progress-card ht-stack-sm"
+				id={ "person-rewards-" + i64toa(entry.Person.ID) }
+				if view.FocusID == entry.Person.ID {
+					style="box-shadow:0 0 0 2px var(--terracotta)"
+				}
+			>
+				<h3 class="ht-card-title">{ entry.Person.Name }</h3>
+				if len(entry.Rewards) == 0 {
+					<p class="ht-note">No rewards yet — add one below.</p>
+				} else {
+					<ul class="ht-list">
+						for _, reward := range entry.Rewards {
+							<li class="ht-row-between">
+								<form
+									method="post"
+									action={ templ.SafeURL("/rewards/" + i64toa(reward.ID)) }
+									class="ht-row"
+									style="flex:1 1 280px"
+								>
+									<input
+										class="ht-input"
+										type="text"
+										name="name"
+										value={ reward.Name }
+										maxlength="80"
+										required
+										aria-label="Reward name"
+										style="flex:1 1 150px"
+									/>
+									<input
+										class="ht-input"
+										type="number"
+										name="cost"
+										value={ itoa(reward.Cost) }
+										min="1"
+										max="9999"
+										aria-label="Cost in points"
+										style="width:84px;flex:0 0 84px"
+										disabled?={ reward.IsAchieved() }
+									/>
+									<button type="submit" class="ht-btn ht-btn-ghost">Save</button>
+									if reward.IsAchieved() {
+										<span class="ht-badge ht-badge-done">achieved</span>
+									} else {
+										<span class="ht-badge">active</span>
+									}
+								</form>
+								if !reward.IsAchieved() {
+									@ConfirmButton(
+										"del-reward-"+i64toa(reward.ID),
+										"Delete",
+										"Delete this reward?",
+										"Only a reward nobody has earned yet can be deleted.",
+										"Delete",
+										"/rewards/"+i64toa(reward.ID)+"/delete",
+										true,
+									)
+								}
+							</li>
+						}
+					</ul>
+				}
+				if !entry.HasActive() {
+					<form
+						method="post"
+						action={ templ.SafeURL("/people/" + i64toa(entry.Person.ID) + "/rewards") }
+						class="ht-field-row ht-divider"
+						style="padding-top:12px"
+					>
+						<label class="ht-field">
+							<span class="ht-label">New reward</span>
+							<input class="ht-input" type="text" name="name" maxlength="80" required placeholder="Lego Minecraft"/>
+						</label>
+						<label class="ht-field" style="flex:0 0 120px">
+							<span class="ht-label">Cost</span>
+							<input class="ht-input" type="number" name="cost" min="1" max="9999" required placeholder="250"/>
+						</label>
+						<button type="submit" class="ht-btn ht-btn-terracotta">Add reward</button>
+					</form>
+				}
+			</article>
+		}
+	</section>
+}

@@ -1,0 +1,48 @@
+package views
+
+import "github.com/el/family-habit-tracker/internal/service"
+
+// Tracker is the home screen: the running sprint's ledger, or an invitation to
+// start one.
+templ Tracker(page Page, grid *service.Grid) {
+	@Layout(page) {
+		if grid == nil || len(grid.Participants) == 0 {
+			@EmptyState(
+				"Start your first sprint",
+				"A sprint is a date range your family commits to a set of habits. Open Settings to configure people, habits, and rewards.",
+			) {
+				<a class="ht-btn ht-btn-terracotta" href="/settings">Go to Settings</a>
+			}
+		} else {
+			<div class="ht-stack">
+				@ProgressStrip(*grid)
+				@SprintGrid(*grid)
+				@sprintFoot(*grid)
+			</div>
+			for _, participant := range grid.Participants {
+				@DeductModal(participant)
+			}
+		}
+	}
+}
+
+// sprintFoot prints the sprint's running tally under the grid, the way the
+// printed sheet totalled its boxes at the bottom.
+templ sprintFoot(grid service.Grid) {
+	<div class="ht-row-between ht-divider" style="padding-top:14px">
+		<span class="ht-note">{ SprintTallyText(grid) }</span>
+		<span class="ht-eyebrow ht-no-print">
+			{ FormatRange(grid.Sprint.StartDate, grid.Sprint.EndDate) }
+		</span>
+	</div>
+}
+
+// TickCell is the fragment returned when a single square is tapped. Alongside
+// the cell itself it carries out-of-band updates for everything else that
+// number changes: the running balance, the reward panel, and the progress card.
+templ TickCell(grid service.Grid, habit service.GridHabit, day service.GridDay, participant service.GridParticipant) {
+	@dayCell(grid, habit, day)
+	@BalanceLabel(participant, true)
+	@RewardPanel(participant, true)
+	@ProgressCard(participant, true)
+}

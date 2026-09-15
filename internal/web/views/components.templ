@@ -1,0 +1,120 @@
+package views
+
+import "github.com/el/family-habit-tracker/internal/service"
+
+// EmptyState is the placeholder shown where there is nothing yet to display.
+templ EmptyState(title, description string) {
+	<div class="ht-empty">
+		<h3>{ title }</h3>
+		<p>{ description }</p>
+		{ children... }
+	</div>
+}
+
+// Modal is a dismissible dialog. It starts hidden and is opened by any control
+// carrying data-modal-open with this id.
+templ Modal(id, title string) {
+	<div class="ht-modal ht-celebration-bg ht-no-print" id={ id } hidden role="dialog" aria-modal="true" aria-labelledby={ id + "-title" }>
+		<div class="ht-celebration-card ht-modal-card">
+			<h2 class="ht-modal-title" id={ id + "-title" }>{ title }</h2>
+			{ children... }
+		</div>
+	</div>
+}
+
+// ConfirmButton pairs a trigger with a confirmation dialog that posts to a
+// URL. Used for anything destructive, so nothing on the shared tablet is one
+// stray tap away from being lost.
+templ ConfirmButton(id, label, title, body, cta, action string, danger bool) {
+	<button
+		type="button"
+		class={ "ht-btn", templ.KV("ht-btn-danger", danger), templ.KV("ht-btn-ghost", !danger) }
+		data-modal-open={ id }
+	>
+		{ label }
+	</button>
+	@Modal(id, title) {
+		<p class="ht-modal-body">{ body }</p>
+		<form method="post" action={ templ.SafeURL(action) } class="ht-modal-actions">
+			<button type="button" class="ht-btn ht-btn-ghost" data-modal-close>Cancel</button>
+			<button
+				type="submit"
+				class={ "ht-btn", templ.KV("ht-btn-danger", danger), templ.KV("ht-btn-terracotta", !danger) }
+			>
+				{ cta }
+			</button>
+		</form>
+	}
+}
+
+// DeductModal is the points dialog behind each person's "− deduct" link.
+//
+// It takes a positive number of points and the server records it as a negative
+// adjustment, so the person operating the tablet never has to think in signs.
+templ DeductModal(participant service.GridParticipant) {
+	{{ id := "deduct-" + i64toa(participant.Participant.ID) }}
+	@Modal(id, "Deduct points · "+participant.Person.Name) {
+		<form method="post" action={ templ.SafeURL("/participants/" + i64toa(participant.Participant.ID) + "/adjustments") }>
+			<label class="ht-field">
+				<span class="ht-label">Points to deduct</span>
+				<input
+					class="ht-input"
+					type="number"
+					name="points"
+					value="1"
+					min="1"
+					max="9999"
+					required
+					inputmode="numeric"
+				/>
+			</label>
+			<label class="ht-field">
+				<span class="ht-label">Reason (optional)</span>
+				<input
+					class="ht-input"
+					type="text"
+					name="reason"
+					maxlength="120"
+					placeholder="e.g. missed bedtime"
+				/>
+			</label>
+			<div class="ht-modal-actions">
+				<button type="button" class="ht-btn ht-btn-ghost" data-modal-close>Cancel</button>
+				<button type="submit" class="ht-btn ht-btn-danger">Deduct</button>
+			</div>
+		</form>
+	}
+}
+
+// Celebration is the full-screen moment when someone reaches their goal. It is
+// delivered as an out-of-band swap on the tick that earns the reward, so it
+// appears without a page reload.
+templ Celebration(personID int64, personName, rewardName string) {
+	<div id="celebration" hx-swap-oob="true">
+		<div class="ht-modal ht-celebration-bg" role="dialog" aria-modal="true" aria-labelledby="celebration-title">
+			<div class="ht-celebration-card">
+				<div class="ht-eyebrow" style="color:var(--terracotta)">Goal hit · 达成</div>
+				<h2 class="ht-celebration-name" id="celebration-title">{ personName }</h2>
+				<p class="ht-celebration-line">
+					earned <b>{ rewardName }</b>
+				</p>
+				<p class="ht-celebration-note">Surplus points roll into the next reward you pick.</p>
+				<div class="ht-modal-actions ht-modal-actions-center">
+					<a
+						class="ht-btn ht-btn-terracotta"
+						href={ templ.SafeURL("/settings?tab=rewards&person=" + i64toa(personID)) }
+					>
+						Pick next reward
+					</a>
+					<button type="button" class="ht-btn ht-btn-ghost" data-modal-close>Maybe later</button>
+				</div>
+			</div>
+		</div>
+	</div>
+}
+
+// ClearCelebration empties the celebration slot on a tick that earns nothing,
+// so a dialog from an earlier tick does not linger.
+templ ClearCelebration() {
+	<div id="celebration" hx-swap-oob="true"></div>
+}
