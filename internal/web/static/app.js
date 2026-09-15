@@ -82,19 +82,26 @@
         delete button.dataset.pending;
     }
 
-    document.body.addEventListener('htmx:beforeRequest', function (event) {
-        var button = event.detail.elt;
+    // htmx reports the form as the requesting element, not the button inside it.
+    function cellButton(event) {
+        var elt = event.detail.elt;
 
-        if (button && button.classList && button.classList.contains('ht-cell-btn')) {
+        return elt && elt.querySelector ? elt.querySelector('.ht-cell-btn') : null;
+    }
+
+    document.body.addEventListener('htmx:beforeRequest', function (event) {
+        var button = cellButton(event);
+
+        if (button) {
             button.dataset.wasTicked = button.dataset.ticked === 'true' ? 'true' : 'false';
             flip(button);
         }
     });
 
     function failed(event) {
-        var button = event.detail.elt;
+        var button = cellButton(event);
 
-        if (button && button.classList && button.classList.contains('ht-cell-btn')) {
+        if (button) {
             rollback(button, button.dataset.wasTicked === 'true');
         }
     }

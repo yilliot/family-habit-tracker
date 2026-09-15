@@ -245,6 +245,17 @@ func TestHTMXTickReturnsAFragmentWithOutOfBandUpdates(t *testing.T) {
 		t.Error("the returned cell should be ticked")
 	}
 
+	// The fragment is a whole <td>, so the form must swap its enclosing cell;
+	// swapping the form itself nests a cell inside a cell and knocks the tick
+	// off the grid.
+	if !strings.HasPrefix(strings.TrimSpace(rendered), "<td") {
+		t.Error("the returned fragment should be a whole day cell")
+	}
+
+	if !strings.Contains(rendered, `hx-target="closest td"`) {
+		t.Error("the cell form should swap its enclosing td")
+	}
+
 	for _, fragment := range []string{`id="bal-`, `id="rw-`, `id="ps-`, `hx-swap-oob="true"`} {
 		if !strings.Contains(rendered, fragment) {
 			t.Errorf("response is missing the out-of-band fragment %q", fragment)

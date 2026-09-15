@@ -589,7 +589,7 @@ func dayCell(grid service.Grid, habit service.GridHabit, day service.GridDay) te
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "\"><form method=\"post\" action=\"/ticks\" hx-post=\"/ticks\" hx-target=\"this\" hx-swap=\"outerHTML\" hx-disabled-elt=\"find button\"><input type=\"hidden\" name=\"habit_id\" value=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 44, "\"><form method=\"post\" action=\"/ticks\" hx-post=\"/ticks\" hx-target=\"closest td\" hx-swap=\"outerHTML\" hx-disabled-elt=\"find button\"><input type=\"hidden\" name=\"habit_id\" value=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
