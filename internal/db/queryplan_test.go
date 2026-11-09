@@ -21,25 +21,21 @@ func TestHotQueriesUseIndexes(t *testing.T) {
 	defer sqlDB.Close()
 
 	queries := map[string]string{
-		"lifetime ticks for a person": `SELECT COUNT(*) FROM ticks t
+		"lifetime ticks for a person": `SELECT COUNT(*) FROM habits h
+			JOIN ticks t ON t.habit_id = h.id WHERE h.person_id = 1`,
+		"ticks for a person over some days": `SELECT t.habit_id, t.tick_date FROM habits h
+			JOIN ticks t ON t.habit_id = h.id
+			WHERE h.person_id = 1 AND t.tick_date >= '2026-01-01' AND t.tick_date < '2026-02-01'`,
+		"ticks per person on a day": `SELECT h.person_id, COUNT(*) FROM ticks t
 			JOIN habits h ON h.id = t.habit_id
-			JOIN sprint_participants sp ON sp.id = h.sprint_participant_id
-			WHERE sp.person_id = 1`,
-		"sprint ticks for a participant": `SELECT COUNT(*) FROM ticks t
-			JOIN habits h ON h.id = t.habit_id WHERE h.sprint_participant_id = 1`,
-		"tick dates for a participant": `SELECT t.habit_id, t.tick_date FROM ticks t
-			JOIN habits h ON h.id = t.habit_id
-			WHERE h.sprint_participant_id = 1 AND h.deleted_at IS NULL`,
-		"habits for a participant": `SELECT id FROM habits
-			WHERE sprint_participant_id = 1 AND deleted_at IS NULL ORDER BY display_order ASC, id ASC`,
-		"lifetime adjustments for a person": `SELECT SUM(pa.amount) FROM point_adjustments pa
-			JOIN sprint_participants sp ON sp.id = pa.sprint_participant_id WHERE sp.person_id = 1`,
-		"adjustments for a participant": `SELECT SUM(amount) FROM point_adjustments WHERE sprint_participant_id = 1`,
-		"sprints a person joined":       `SELECT COUNT(*) FROM sprint_participants WHERE person_id = 1`,
-		"participants in a sprint":      `SELECT id FROM sprint_participants WHERE sprint_id = 1 ORDER BY display_order ASC, id ASC`,
-		"has tick on a day":             `SELECT COUNT(*) FROM ticks WHERE habit_id = 1 AND date(tick_date) = '2026-01-01'`,
-		"rewards spent since": `SELECT SUM(cost) FROM rewards WHERE person_id = 1
-			AND achieved_at IS NOT NULL AND datetime(achieved_at) >= datetime('2026-01-01 00:00:00')`,
+			WHERE t.tick_date >= '2026-01-01' AND t.tick_date < '2026-01-02' AND h.person_id IS NOT NULL
+			GROUP BY h.person_id`,
+		"ticks by habit for a person": `SELECT h.id, COUNT(t.id) FROM habits h
+			JOIN ticks t ON t.habit_id = h.id WHERE h.person_id = 1 GROUP BY h.id`,
+		"habits for a person":        `SELECT id FROM habits WHERE person_id = 1 ORDER BY display_order ASC, id ASC`,
+		"adjustments for a person":   `SELECT SUM(amount) FROM point_adjustments WHERE person_id = 1`,
+		"has tick on a day":          `SELECT COUNT(*) FROM ticks WHERE habit_id = 1 AND date(tick_date) = '2026-01-01'`,
+		"rewards spent":              `SELECT SUM(cost) FROM rewards WHERE person_id = 1 AND achieved_at IS NOT NULL`,
 		"active reward for a person": `SELECT id FROM rewards WHERE person_id = 1 AND achieved_at IS NULL ORDER BY id ASC LIMIT 1`,
 	}
 

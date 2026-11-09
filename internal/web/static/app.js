@@ -1,10 +1,9 @@
 /*
  * Progressive enhancement for the family ledger.
  *
- * Everything on the page works without this file: each tick cell is a real
- * submit button inside a real form, and every settings form is a plain POST.
- * This script makes ticking feel instant on the tablet and replaces full page
- * reloads with targeted updates.
+ * Everything on the page works without this file: each habit's box is a real
+ * submit button inside a real form, and every other form is a plain POST.
+ * This script makes ticking feel instant and shows toasts and dialogs.
  */
 (function () {
     'use strict';
@@ -62,47 +61,44 @@
     /* ——— Optimistic ticking ————————————————————————————————————— */
 
     /*
-     * The cell flips the moment it is tapped, before the request is sent, so
-     * the tablet never feels laggy. The server's response then replaces the
-     * cell with the authoritative state; if the request fails the flip is
-     * rolled back and the reason is shown.
+     * A habit flips the moment it is tapped, before the request is sent, so
+     * the tablet never feels laggy. The server then answers with the row and
+     * the totals freshly rendered; if the request fails the flip is rolled
+     * back and the reason is shown.
      */
-    function flip(button) {
-        var next = button.dataset.ticked !== 'true';
-        button.dataset.ticked = next ? 'true' : 'false';
-        button.setAttribute('aria-pressed', next ? 'true' : 'false');
-        button.dataset.pending = 'true';
 
-        return next;
-    }
-
-    function rollback(button, previous) {
-        button.dataset.ticked = previous ? 'true' : 'false';
-        button.setAttribute('aria-pressed', previous ? 'true' : 'false');
-        delete button.dataset.pending;
-    }
-
-    // htmx reports the form as the requesting element, not the button inside it.
-    function cellButton(event) {
+    // htmx reports the form as the requesting element; the row is its parent.
+    function habitRow(event) {
         var elt = event.detail.elt;
 
-        return elt && elt.querySelector ? elt.querySelector('.ht-cell-btn') : null;
+        return elt && elt.closest ? elt.closest('.ht-habit') : null;
+    }
+
+    function setDone(row, done) {
+        var button = row.querySelector('.ht-check');
+
+        row.dataset.done = done ? 'true' : 'false';
+        if (button) {
+            button.setAttribute('aria-pressed', done ? 'true' : 'false');
+        }
     }
 
     document.body.addEventListener('htmx:beforeRequest', function (event) {
-        var button = cellButton(event);
+        var row = habitRow(event);
 
-        if (button) {
-            button.dataset.wasTicked = button.dataset.ticked === 'true' ? 'true' : 'false';
-            flip(button);
+        if (row) {
+            row.dataset.wasDone = row.dataset.done;
+            row.dataset.pending = 'true';
+            setDone(row, row.dataset.done !== 'true');
         }
     });
 
     function failed(event) {
-        var button = cellButton(event);
+        var row = habitRow(event);
 
-        if (button) {
-            rollback(button, button.dataset.wasTicked === 'true');
+        if (row) {
+            setDone(row, row.dataset.wasDone === 'true');
+            delete row.dataset.pending;
         }
     }
 
@@ -217,61 +213,18 @@
     });
 
     // A celebration arriving mid-session should take focus, so the news is not
-    // missed and the dialog can be dismissed from the keyboard.
-    document.body.addEventListener('htmx:afterSwap', function (event) {
-        if (event.detail.target && event.detail.target.id === 'celebration') {
-            var modal = event.detail.target.querySelector('.ht-modal');
+    // missed and the dialog can be dismissed from the keyboard. It arrives as
+    // an out-of-band swap alongside the day.
+    // The event names the element that was swapped out, so read the slot
+    // afresh rather than through it.
+    document.body.addEventListener('htmx:oobAfterSwap', function () {
+        var modal = document.querySelector('#celebration .ht-modal:not([hidden])');
 
-            if (modal && !modal.hidden) {
-                var targets = focusables(modal);
-                if (targets.length) {
-                    targets[0].focus();
-                }
+        if (modal) {
+            var targets = focusables(modal);
+            if (targets.length) {
+                targets[0].focus();
             }
         }
-    });
-
-    /* ——— Sprint dates ——————————————————————————————————————————— */
-
-    /*
-     * The start-sprint form is the only one carrying freshly typed text (each
-     * person's habits), so a round trip to the server just to be told the end
-     * date precedes the start would throw that work away. Bind the two inputs
-     * together instead; the server still enforces the same rule.
-     */
-    document.addEventListener('DOMContentLoaded', function () {
-        var start = document.querySelector('input[name="start_date"]');
-        var end = document.querySelector('input[name="end_date"]');
-
-        if (!start || !end) {
-            return;
-        }
-
-        function sync() {
-            end.min = start.value;
-
-            if (end.value && end.value < start.value) {
-                end.value = start.value;
-            }
-        }
-
-        start.addEventListener('change', sync);
-        sync();
-    });
-
-    /* ——— Grid convenience ——————————————————————————————————————— */
-
-    // Scroll today's column into view on a long sprint, so the tablet opens on
-    // the day someone actually wants to tap.
-    document.addEventListener('DOMContentLoaded', function () {
-        var today = document.querySelector('[data-today-col="true"]');
-        var scroller = today && today.closest('.ht-scroll-x');
-
-        if (!today || !scroller || scroller.scrollWidth <= scroller.clientWidth) {
-            return;
-        }
-
-        var offset = today.offsetLeft - scroller.clientWidth / 2 + today.offsetWidth / 2;
-        scroller.scrollLeft = Math.max(0, offset);
     });
 })();

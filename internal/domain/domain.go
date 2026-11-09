@@ -4,14 +4,7 @@ package domain
 
 import "time"
 
-// Sprint statuses.
-const (
-	StatusActive   = "active"
-	StatusArchived = "archived"
-)
-
-// Person is a family member. People are global and outlive any single sprint,
-// so a person who sits one out keeps their history and can rejoin later.
+// Person is a family member. Archiving one hides them and keeps their history.
 type Person struct {
 	ID           int64
 	Name         string
@@ -24,39 +17,8 @@ type Person struct {
 // IsArchived reports whether the person has been soft-deleted.
 func (p Person) IsArchived() bool { return p.DeletedAt != nil }
 
-// Sprint is a bounded, family-meeting-delimited period. Exactly one sprint may
-// be active at a time.
-type Sprint struct {
-	ID        int64
-	StartDate time.Time
-	EndDate   time.Time
-	Status    string
-	StartedAt *time.Time
-	EndedAt   *time.Time
-	CreatedAt *time.Time
-	UpdatedAt *time.Time
-}
-
-// IsActive reports whether the sprint still accepts writes.
-func (s Sprint) IsActive() bool { return s.Status == StatusActive }
-
-// IsArchived reports whether the sprint is read-only.
-func (s Sprint) IsArchived() bool { return s.Status == StatusArchived }
-
-// Days returns every day in the sprint range, inclusive of both ends.
-func (s Sprint) Days() []time.Time {
-	var days []time.Time
-
-	for cursor := s.StartDate; !cursor.After(s.EndDate); cursor = cursor.AddDate(0, 0, 1) {
-		days = append(days, cursor)
-	}
-
-	return days
-}
-
 // Reward is a freeform goal with a point cost. A person has at most one active
-// (un-achieved) reward at a time, and earns toward it across as many sprints as
-// it takes.
+// (un-achieved) reward at a time, and earns toward it for as long as it takes.
 type Reward struct {
 	ID         int64
 	PersonID   int64
@@ -70,29 +32,32 @@ type Reward struct {
 // IsAchieved reports whether the reward has been earned.
 func (r Reward) IsAchieved() bool { return r.AchievedAt != nil }
 
-// SprintParticipant is one person's enrolment in one sprint. It carries the
-// opening point balance for the sprint and the reward being earned toward.
-type SprintParticipant struct {
-	ID                  int64
-	SprintID            int64
-	PersonID            int64
-	CarryForwardBalance int
-	ActiveRewardID      *int64
-	DisplayOrder        int
-	CreatedAt           *time.Time
-	UpdatedAt           *time.Time
-}
-
-// Habit is a behaviour tracked for one participant within one sprint.
+// Habit is something one person does daily. It runs from StartDate until
+// EndDate, inclusive, or for as long as EndDate is nil. Stopping a habit sets
+// EndDate and keeps the row, so its ticks and points stay in the history.
+//
+// SprintParticipantID survives only on rows created while the app still ran in
+// sprints; it is kept for the record and never read.
 type Habit struct {
 	ID                  int64
+	PersonID            int64
 	SprintParticipantID *int64
 	Name                string
 	DisplayOrder        int
+	StartDate           time.Time
+	EndDate             *time.Time
 	CreatedAt           *time.Time
 	UpdatedAt           *time.Time
 	DeletedAt           *time.Time
 }
+
+// LiveOn reports whether the habit was running on a day.
+func (h Habit) LiveOn(day time.Time) bool {
+	return !day.Before(h.StartDate) && (h.EndDate == nil || !day.After(*h.EndDate))
+}
+
+// IsRunning reports whether the habit has not been stopped.
+func (h Habit) IsRunning() bool { return h.EndDate == nil }
 
 // Tick is a single day's completion of one habit, worth one point.
 type Tick struct {
@@ -102,12 +67,12 @@ type Tick struct {
 	CreatedAt time.Time
 }
 
-// PointAdjustment is a manual, signed correction to a participant's balance.
+// PointAdjustment is a manual, signed correction to a person's balance.
 // Negative amounts are deductions; positive amounts are manual awards.
 type PointAdjustment struct {
-	ID                  int64
-	SprintParticipantID int64
-	Amount              int
-	Reason              *string
-	CreatedAt           time.Time
+	ID        int64
+	PersonID  int64
+	Amount    int
+	Reason    *string
+	CreatedAt time.Time
 }

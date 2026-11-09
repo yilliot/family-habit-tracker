@@ -2,145 +2,193 @@ package web
 
 import (
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/el/family-habit-tracker/internal/web/views"
 )
 
-// tracker renders the home screen: the running sprint's ledger.
-func (s *Server) tracker(w http.ResponseWriter, r *http.Request) {
-	page, err := s.page(w, r, "Tracker")
-	if err != nil {
-		s.fail(w, r, err)
+// personCookie remembers, per device, whose page it last showed, so a child's
+// own tablet opens straight onto their today.
+const personCookie = "ht_person"
 
-		return
+// rememberedPerson returns the person this device last used, or zero.
+func (s *Server) rememberedPerson(r *http.Request) int64 {
+	cookie, err := r.Cookie(personCookie)
+	if err != nil {
+		return 0
 	}
 
-	grid, err := s.service.ActiveGrid(ctx(r))
+	id, err := strconv.ParseInt(cookie.Value, 10, 64)
 	if err != nil {
-		s.fail(w, r, err)
-
-		return
+		return 0
 	}
 
-	s.render(w, r, http.StatusOK, views.Tracker(page, grid))
+	return id
 }
 
-// historyIndex lists archived sprints.
-func (s *Server) historyIndex(w http.ResponseWriter, r *http.Request) {
-	page, err := s.page(w, r, "History")
-	if err != nil {
-		s.fail(w, r, err)
-
-		return
-	}
-
-	entries, err := s.service.HistoryList(ctx(r))
-	if err != nil {
-		s.fail(w, r, err)
-
-		return
-	}
-
-	s.render(w, r, http.StatusOK, views.HistoryIndex(page, entries))
+// remember stores the person whose page is being shown.
+func remember(w http.ResponseWriter, personID int64) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     personCookie,
+		Value:    strconv.FormatInt(personID, 10),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   400 * 24 * 60 * 60,
+	})
 }
 
-// historyShow renders one archived sprint read-only. An active sprint is not
-// reachable here; it lives on the tracker, where it can still be ticked.
-func (s *Server) historyShow(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "sprint")
-	if err != nil {
-		s.notFound(w, r)
-
-		return
+// home opens the person this device last used, on today. A device that has not
+// been used yet, or whose person has since been archived, is asked who is
+// ticking.
+func (s *Server) home(w http.ResponseWriter, r *http.Request) {
+	next := ""
+	if r.URL.Query().Get("next") == "history" {
+		next = "/history"
 	}
 
-	sprint, err := s.service.Store().Sprint(ctx(r), id)
-	if err != nil {
-		s.fail(w, r, err)
+	if id := s.rememberedPerson(r); id != 0 && r.URL.Query().Get("pick") == "" {
+		if _, err := s.service.Store().Person(ctx(r), id); err == nil {
+			http.Redirect(w, r, views.PersonHref(id)+next, http.StatusSeeOther)
 
-		return
-	}
-
-	if !sprint.IsArchived() {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-
-		return
-	}
-
-	page, err := s.page(w, r, "Archived sprint")
-	if err != nil {
-		s.fail(w, r, err)
-
-		return
-	}
-
-	// The masthead should print the sprint being read, not the running one.
-	page.Sprint = &sprint
-
-	grid, err := s.service.BuildGrid(ctx(r), sprint)
-	if err != nil {
-		s.fail(w, r, err)
-
-		return
-	}
-
-	s.render(w, r, http.StatusOK, views.HistoryShow(page, grid))
-}
-
-// totals renders the family's lifetime record.
-func (s *Server) totals(w http.ResponseWriter, r *http.Request) {
-	page, err := s.page(w, r, "Totals")
-	if err != nil {
-		s.fail(w, r, err)
-
-		return
-	}
-
-	records, err := s.service.LifetimeTotals(ctx(r))
-	if err != nil {
-		s.fail(w, r, err)
-
-		return
-	}
-
-	s.render(w, r, http.StatusOK, views.Totals(page, records))
-}
-
-// settings renders the family-meeting page. The open tab comes from the query
-// string so that a tab can be linked to and bookmarked.
-func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
-	page, err := s.page(w, r, "Settings")
-	if err != nil {
-		s.fail(w, r, err)
-
-		return
-	}
-
-	data, err := s.service.Settings(ctx(r))
-	if err != nil {
-		s.fail(w, r, err)
-
-		return
-	}
-
-	view := views.SettingsView{Data: data, Tab: normaliseTab(r.URL.Query().Get("tab"))}
-
-	if focus := r.URL.Query().Get("person"); focus != "" {
-		if id, err := parseInt64(focus); err == nil {
-			view.FocusID = id
+			return
 		}
 	}
 
-	s.render(w, r, http.StatusOK, views.Settings(page, view))
+	strip, err := s.service.Strip(ctx(r))
+	if err != nil {
+		s.fail(w, r, err)
+
+		return
+	}
+
+	page := s.page(w, r, "Who's ticking?", views.SectionToday, 0)
+	page.PersonID = 0
+
+	s.render(w, r, http.StatusOK, views.PickerPage(page, strip, next))
 }
 
-// normaliseTab keeps an unknown or absent tab on the sprint panel, which is
-// what a family meeting opens first.
-func normaliseTab(tab string) string {
-	switch tab {
-	case "people", "rewards", "sprint":
-		return tab
-	default:
-		return "sprint"
+// dayPage renders one person's day: today at /p/{id}, another day at
+// /p/{id}/{yyyy-mm-dd}. A future date, or today's own date, redirects to the
+// plain URL so each day has exactly one address.
+func (s *Server) dayPage(w http.ResponseWriter, r *http.Request) {
+	personID, ok := s.personParam(w, r)
+	if !ok {
+		return
 	}
+
+	today := s.service.Today()
+	day := today
+
+	if raw := r.PathValue("date"); raw != "" {
+		parsed, err := time.ParseInLocation("2006-01-02", raw, time.UTC)
+		if err != nil {
+			s.notFound(w, r)
+
+			return
+		}
+
+		if !parsed.Before(today) {
+			http.Redirect(w, r, views.PersonHref(personID), http.StatusSeeOther)
+
+			return
+		}
+
+		day = parsed
+	}
+
+	view, err := s.service.Day(ctx(r), personID, day)
+	if err != nil {
+		s.fail(w, r, err)
+
+		return
+	}
+
+	remember(w, personID)
+
+	title := view.Person.Name
+	if !view.IsToday() {
+		title += " · " + views.ISODate(view.Day)
+	}
+
+	s.render(w, r, http.StatusOK, views.DayPage(s.page(w, r, title, views.SectionToday, personID), view))
+}
+
+// editPage renders a person's habits and goal for editing.
+func (s *Server) editPage(w http.ResponseWriter, r *http.Request) {
+	personID, ok := s.personParam(w, r)
+	if !ok {
+		return
+	}
+
+	view, err := s.service.Edit(ctx(r), personID)
+	if err != nil {
+		s.fail(w, r, err)
+
+		return
+	}
+
+	remember(w, personID)
+
+	s.render(w, r, http.StatusOK, views.EditPage(s.page(w, r, "Edit · "+view.Person.Name, views.SectionToday, personID), view))
+}
+
+// historyPage renders one month of a person's history; ?m=2026-08 picks the
+// month, defaulting to this one.
+func (s *Server) historyPage(w http.ResponseWriter, r *http.Request) {
+	personID, ok := s.personParam(w, r)
+	if !ok {
+		return
+	}
+
+	month := s.service.Today()
+	if raw := r.URL.Query().Get("m"); raw != "" {
+		parsed, err := time.ParseInLocation("2006-01", raw, time.UTC)
+		if err != nil {
+			s.notFound(w, r)
+
+			return
+		}
+
+		month = parsed
+	}
+
+	view, err := s.service.Month(ctx(r), personID, month)
+	if err != nil {
+		s.fail(w, r, err)
+
+		return
+	}
+
+	remember(w, personID)
+
+	page := s.page(w, r, view.Person.Name+" · "+view.Grid.Label(), views.SectionHistory, personID)
+
+	s.render(w, r, http.StatusOK, views.HistoryPage(page, view))
+}
+
+// familyPage renders the family list.
+func (s *Server) familyPage(w http.ResponseWriter, r *http.Request) {
+	view, err := s.service.Family(ctx(r))
+	if err != nil {
+		s.fail(w, r, err)
+
+		return
+	}
+
+	s.render(w, r, http.StatusOK, views.FamilyPage(s.page(w, r, "Family", views.SectionFamily, 0), view))
+}
+
+// personParam reads the {person} path value, answering 404 itself when it is
+// not a number.
+func (s *Server) personParam(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := pathID(r, "person")
+	if err != nil {
+		s.notFound(w, r)
+
+		return 0, false
+	}
+
+	return id, true
 }

@@ -42,8 +42,8 @@ func (s *Store) People(ctx context.Context) ([]domain.Person, error) {
 	return s.people(ctx, true)
 }
 
-// PeopleWithTrashed lists all family members including soft-deleted ones, so
-// Settings can show archived members without letting them rejoin implicitly.
+// PeopleWithTrashed lists all family members including archived ones, for the
+// Family page.
 func (s *Store) PeopleWithTrashed(ctx context.Context) ([]domain.Person, error) {
 	return s.people(ctx, false)
 }
@@ -159,4 +159,30 @@ func (s *Store) NextPersonDisplayOrder(ctx context.Context) (int, error) {
 	}
 
 	return int(max.Int64) + 1, nil
+}
+
+// SetPersonOrder sets a family member's position in the list.
+func (s *Store) SetPersonOrder(ctx context.Context, id int64, displayOrder int) error {
+	_, err := s.q.ExecContext(ctx,
+		`UPDATE people SET display_order = ?, updated_at = ? WHERE id = ?`,
+		displayOrder, db.FormatTime(s.Now()), id,
+	)
+	if err != nil {
+		return fmt.Errorf("order person %d: %w", id, err)
+	}
+
+	return nil
+}
+
+// RestorePerson brings an archived family member back.
+func (s *Store) RestorePerson(ctx context.Context, id int64) error {
+	_, err := s.q.ExecContext(ctx,
+		`UPDATE people SET deleted_at = NULL, updated_at = ? WHERE id = ?`,
+		db.FormatTime(s.Now()), id,
+	)
+	if err != nil {
+		return fmt.Errorf("restore person %d: %w", id, err)
+	}
+
+	return nil
 }

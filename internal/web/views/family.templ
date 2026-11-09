@@ -1,0 +1,115 @@
+package views
+
+import "github.com/el/family-habit-tracker/internal/service"
+
+// FamilyPage lists who is in the family: add, rename, reorder and archive.
+// Habits and goals live on each person's own pages.
+templ FamilyPage(page Page, view service.FamilyView) {
+	@Layout(page) {
+		<div class="ht-sheet">
+			<div class="ht-dayhead">
+				<span class="ht-arrow" aria-hidden="true" data-off="true"></span>
+				<div class="ht-dayhead-text">
+					<div class="ht-eyebrow">家人</div>
+					<h1 class="ht-day-title">Family</h1>
+				</div>
+				<span class="ht-arrow" aria-hidden="true" data-off="true"></span>
+			</div>
+			<section class="ht-section" aria-labelledby="people-title">
+				<h2 class="ht-eyebrow" id="people-title">People</h2>
+				if len(view.Members) == 0 {
+					<p class="ht-empty-line">Nobody yet. Add the first family member below.</p>
+				} else {
+					<ul class="ht-edit-list">
+						for index, member := range view.Members {
+							<li class="ht-edit-row">
+								<form method="post" action={ templ.SafeURL("/people/" + i64toa(member.Person.ID) + "/move") }>
+									<input type="hidden" name="dir" value="up"/>
+									<button class="ht-mini" type="submit" disabled?={ index == 0 } aria-label={ "Move " + member.Person.Name + " up" }>↑</button>
+								</form>
+								<form method="post" action={ templ.SafeURL("/people/" + i64toa(member.Person.ID) + "/move") }>
+									<input type="hidden" name="dir" value="down"/>
+									<button class="ht-mini" type="submit" disabled?={ index == len(view.Members)-1 } aria-label={ "Move " + member.Person.Name + " down" }>↓</button>
+								</form>
+								<form class="ht-rename" method="post" action={ templ.SafeURL("/people/" + i64toa(member.Person.ID)) }>
+									<label class="ht-sr" for={ "person-" + i64toa(member.Person.ID) }>{ "Name of " + member.Person.Name }</label>
+									<input class="ht-input ht-person-input" id={ "person-" + i64toa(member.Person.ID) } type="text" name="name" value={ member.Person.Name } maxlength="50" required/>
+									<button class="ht-mini ht-save" type="submit" aria-label={ "Save the name of " + member.Person.Name }>✓</button>
+								</form>
+								@ConfirmButton(
+									"archive-"+i64toa(member.Person.ID),
+									"Archive",
+									"Archive · "+member.Person.Name,
+									member.Person.Name+" leaves the family list. All of their habits, ticks, points and goals are kept, and they can be brought back below.",
+									"Archive",
+									"/people/"+i64toa(member.Person.ID)+"/delete",
+								)
+							</li>
+						}
+					</ul>
+				}
+				<form class="ht-add" method="post" action="/people">
+					<label class="ht-sr" for="new-person">New family member</label>
+					<input class="ht-input" id="new-person" type="text" name="name" maxlength="50" required placeholder="Add a family member…" autocomplete="off"/>
+					<button type="submit" class="ht-btn">Add</button>
+				</form>
+			</section>
+			if len(view.Members) > 0 {
+				<section class="ht-section" aria-labelledby="goals-title">
+					<h2 class="ht-eyebrow" id="goals-title">Habits &amp; goals</h2>
+					<ul class="ht-lines">
+						for _, member := range view.Members {
+							<li class="ht-line">
+								<a class="ht-line-name" href={ templ.SafeURL(EditHref(member.Person.ID)) }>{ member.Person.Name }</a>
+								<span class="ht-note">{ itoa(member.Running) + " " + Pluralise(member.Running, "habit", "habits") + " · " + goalProgress(member.Goal, member.Balance) }</span>
+								<a class="ht-link-caps" href={ templ.SafeURL(EditHref(member.Person.ID)) }>Edit</a>
+							</li>
+						}
+					</ul>
+				</section>
+			}
+			if len(view.Archived) > 0 {
+				<section class="ht-section" aria-labelledby="archived-title">
+					<h2 class="ht-eyebrow" id="archived-title">Archived</h2>
+					<ul class="ht-lines">
+						for _, person := range view.Archived {
+							<li class="ht-line">
+								<span class="ht-line-name">{ person.Name }</span>
+								<form method="post" action={ templ.SafeURL("/people/" + i64toa(person.ID) + "/restore") }>
+									<button class="ht-btn-line" type="submit">Bring back</button>
+								</form>
+							</li>
+						}
+					</ul>
+				</section>
+			}
+		</div>
+	}
+}
+
+// PickerPage asks a device that has not been used before whose page to open.
+// The choice is remembered on the device.
+templ PickerPage(page Page, strip []service.StripEntry, next string) {
+	@Layout(page) {
+		<div class="ht-sheet ht-picker">
+			if len(strip) == 0 {
+				@EmptyState("Welcome", "Add your family first; each person then gets their own page.") {
+					<a class="ht-btn ht-btn-accent" href="/family">Add family</a>
+				}
+			} else {
+				<h1 class="ht-picker-title">Who's ticking?</h1>
+				<p class="ht-note">This device will remember. Switch any time from the names at the top.</p>
+				<ul class="ht-picker-grid">
+					for _, entry := range strip {
+						<li>
+							<a href={ templ.SafeURL(PersonHref(entry.Person.ID) + next) } data-all-done={ boolAttr(entry.AllDone()) }>
+								<span class="ht-picker-name">{ entry.Person.Name }</span>
+								<span class="ht-note">{ countText(entry.Done, entry.Total, true) }</span>
+							</a>
+						</li>
+					}
+				</ul>
+			}
+		</div>
+	}
+}

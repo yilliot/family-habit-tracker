@@ -46,7 +46,7 @@ func TestParseTimeRejectsNonsense(t *testing.T) {
 }
 
 // A date column that happens to hold a full timestamp must still read back as a
-// plain day, or a sprint's first day would drift.
+// plain day, or a habit's first day would drift.
 func TestScanDateDiscardsAnyTimeComponent(t *testing.T) {
 	got, err := db.ScanDate(sql.NullString{String: "2026-04-19 23:59:59", Valid: true})
 	if err != nil {
@@ -95,8 +95,8 @@ func TestFormatTimeNormalisesToUTC(t *testing.T) {
 	}
 }
 
-// Opening a database twice must be safe: the schema uses IF NOT EXISTS
-// throughout so an existing production file is left exactly as it was.
+// Opening a database again must be safe: each schema step runs once, so an
+// existing production file is left exactly as it was.
 func TestOpenIsIdempotent(t *testing.T) {
 	path := t.TempDir() + "/repeat.sqlite"
 
@@ -156,9 +156,7 @@ func TestOneTickPerHabitPerDay(t *testing.T) {
 	defer sqlDB.Close()
 
 	mustExec(t, sqlDB, `INSERT INTO people (id, name, display_order) VALUES (1, '可遇', 1)`)
-	mustExec(t, sqlDB, `INSERT INTO sprints (id, start_date, end_date, status) VALUES (1, '2026-04-19', '2026-05-16', 'active')`)
-	mustExec(t, sqlDB, `INSERT INTO sprint_participants (id, sprint_id, person_id) VALUES (1, 1, 1)`)
-	mustExec(t, sqlDB, `INSERT INTO habits (id, sprint_participant_id, name) VALUES (1, 1, '阅读')`)
+	mustExec(t, sqlDB, `INSERT INTO habits (id, person_id, name, start_date) VALUES (1, 1, '阅读', '2026-04-19')`)
 	mustExec(t, sqlDB, `INSERT INTO ticks (habit_id, tick_date) VALUES (1, '2026-04-20')`)
 
 	_, err = sqlDB.ExecContext(ctx, `INSERT INTO ticks (habit_id, tick_date) VALUES (1, '2026-04-20')`)

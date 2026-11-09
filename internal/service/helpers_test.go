@@ -12,35 +12,37 @@ import (
 	"github.com/el/family-habit-tracker/internal/store"
 )
 
-// fixedToday is the day every test pretends it is, so date-boundary rules are
-// deterministic rather than dependent on when the suite runs.
-var fixedToday = time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
+// clock is a movable "now", so a test can add a habit, let days pass, and tick
+// on each of them.
+type clock struct{ now time.Time }
 
-// newTestService builds a service over a fresh database with a pinned clock.
-func newTestService(t *testing.T) (*service.Service, *store.Store, context.Context) {
+func (c *clock) at(y int, m time.Month, d int) { c.now = time.Date(y, m, d, 9, 30, 0, 0, time.UTC) }
+
+// newTestService builds a service over a fresh database whose clock starts on
+// Monday 9 November 2026.
+func newTestService(t *testing.T) (*service.Service, *clock, context.Context) {
 	t.Helper()
 
-	ctx := t.Context()
-	path := filepath.Join(t.TempDir(), "test.sqlite")
-
-	sqlDB, err := db.Open(ctx, path)
+	sqlDB, err := db.Open(t.Context(), filepath.Join(t.TempDir(), "test.sqlite"))
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
 
 	t.Cleanup(func() { sqlDB.Close() })
 
-	dataStore := store.New(sqlDB).WithClock(func() time.Time { return fixedToday })
+	c := &clock{}
+	c.at(2026, 11, 9)
 
-	return service.New(dataStore), dataStore, ctx
+	dataStore := store.New(sqlDB).WithClock(func() time.Time { return c.now })
+
+	return service.New(dataStore), c, t.Context()
 }
 
-// day builds a UTC day for the test's fixed calendar.
+// day builds a UTC day.
 func day(y int, m time.Month, d int) time.Time {
 	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 }
 
-// mustPerson creates a family member or fails the test.
 func mustPerson(t *testing.T, svc *service.Service, ctx context.Context, name string) domain.Person {
 	t.Helper()
 
@@ -52,67 +54,57 @@ func mustPerson(t *testing.T, svc *service.Service, ctx context.Context, name st
 	return person
 }
 
-// startSprint opens a sprint running across the fixed today, with the given
-// habits for one person.
-func startSprint(t *testing.T, svc *service.Service, ctx context.Context, person domain.Person, habits ...string) (domain.Sprint, domain.SprintParticipant) {
+func mustHabit(t *testing.T, svc *service.Service, ctx context.Context, person domain.Person, name string) domain.Habit {
 	t.Helper()
 
-	inputs := make([]service.HabitInput, 0, len(habits))
-	for index, name := range habits {
-		inputs = append(inputs, service.HabitInput{Name: name, DisplayOrder: index + 1})
-	}
-
-	sprint, err := svc.StartSprint(ctx, day(2026, 4, 19), day(2026, 5, 16), []service.ParticipantInput{
-		{PersonID: person.ID, Habits: inputs, Reward: service.RewardChoice{Mode: service.RewardNone}},
-	})
+	habit, err := svc.AddHabit(ctx, person.ID, name)
 	if err != nil {
-		t.Fatalf("start sprint: %v", err)
+		t.Fatalf("add habit %q: %v", name, err)
 	}
 
-	participant := participantFor(t, svc, ctx, sprint, person)
-
-	return sprint, participant
+	return habit
 }
 
-// participantFor looks up a person's enrolment in a sprint.
-func participantFor(t *testing.T, svc *service.Service, ctx context.Context, sprint domain.Sprint, person domain.Person) domain.SprintParticipant {
+func mustTick(t *testing.T, svc *service.Service, ctx context.Context, habit domain.Habit, on time.Time) service.ToggleResult {
 	t.Helper()
 
-	participant, err := svc.Store().ParticipantForPerson(ctx, sprint.ID, person.ID)
-	if err != nil || participant == nil {
-		t.Fatalf("participant for person %d: %v", person.ID, err)
+	result, err := svc.ToggleTick(ctx, habit.ID, on)
+	if err != nil {
+		t.Fatalf("tick %q on %s: %v", habit.Name, on.Format("2006-01-02"), err)
 	}
 
-	return *participant
+	return result
 }
 
-// habitsOf returns a participant's habits in display order.
-func habitsOf(t *testing.T, svc *service.Service, ctx context.Context, participant domain.SprintParticipant) []domain.Habit {
+func balanceOf(t *testing.T, svc *service.Service, ctx context.Context, person domain.Person) int {
 	t.Helper()
 
-	habits, err := svc.Store().HabitsByParticipant(ctx, participant.ID)
+	balance, err := svc.Points().Balance(ctx, person.ID)
 	if err != nil {
-		t.Fatalf("habits for participant %d: %v", participant.ID, err)
-	}
-
-	return habits
-}
-
-// balanceOf returns a participant's current sprint balance.
-func balanceOf(t *testing.T, svc *service.Service, ctx context.Context, sprint domain.Sprint, participant domain.SprintParticipant) int {
-	t.Helper()
-
-	refreshed, err := svc.Store().Participant(ctx, participant.ID)
-	if err != nil {
-		t.Fatalf("reload participant: %v", err)
-	}
-
-	balance, err := svc.Points().SprintBalance(ctx, sprint, refreshed)
-	if err != nil {
-		t.Fatalf("sprint balance: %v", err)
+		t.Fatalf("balance: %v", err)
 	}
 
 	return balance
+}
+
+func dayView(t *testing.T, svc *service.Service, ctx context.Context, person domain.Person, on time.Time) service.DayView {
+	t.Helper()
+
+	view, err := svc.Day(ctx, person.ID, on)
+	if err != nil {
+		t.Fatalf("day view: %v", err)
+	}
+
+	return view
+}
+
+func names(rows []service.DayHabit) []string {
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.Habit.Name)
+	}
+
+	return out
 }
 
 // requireValidation asserts that err is a validation failure naming field.

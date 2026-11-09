@@ -3,7 +3,6 @@ package web
 import (
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/el/family-habit-tracker/internal/domain"
 	"github.com/el/family-habit-tracker/internal/service"
@@ -12,11 +11,13 @@ import (
 
 /* ——— Ticking ——————————————————————————————————————————————————— */
 
-// toggleTick flips one square of the ledger.
+// toggleTick flips one habit on one day.
 //
-// From htmx it answers with just the cell plus out-of-band updates for the
-// balance, reward panel and progress card. Without JavaScript the same POST
-// falls through to a redirect and the page simply re-renders.
+// From htmx it answers with the tapped row plus out-of-band updates for the
+// count, week, points, month, family strip and celebration slot, all from one
+// fresh read of the day, so nothing swapped in can drift from a reload.
+// Without JavaScript the same POST falls through to a redirect and the page
+// simply re-renders.
 func (s *Server) toggleTick(w http.ResponseWriter, r *http.Request) {
 	if !s.form(w, r) {
 		return
@@ -46,46 +47,22 @@ func (s *Server) toggleTick(w http.ResponseWriter, r *http.Request) {
 			setFlash(w, "success", result.Person.Name+" earned "+result.JustAchieved.Name+"!")
 		}
 
-		s.redirectBack(w, r, "/")
+		s.redirectBack(w, r, views.DayHref(result.Person.ID, day, s.service.Today()))
 
 		return
 	}
 
-	s.renderTickFragment(w, r, result, habitID, day)
-}
-
-// renderTickFragment answers an htmx tick with the freshly computed cell and
-// everything else on the page that the tick changed.
-func (s *Server) renderTickFragment(w http.ResponseWriter, r *http.Request, result service.ToggleResult, habitID int64, day time.Time) {
-	sprint, err := s.service.Store().Sprint(ctx(r), result.Participant.SprintID)
+	view, err := s.service.Day(ctx(r), result.Person.ID, day)
 	if err != nil {
 		s.fail(w, r, err)
 
 		return
 	}
 
-	// Rebuilding the grid keeps the fragment and the full page render on one
-	// code path, so a cell swapped in place can never drift from a reload. At
-	// family scale this is a handful of indexed queries.
-	grid, err := s.service.BuildGrid(ctx(r), sprint)
-	if err != nil {
-		s.fail(w, r, err)
-
-		return
-	}
-
-	participant, habit, ok := findHabit(grid, habitID)
-	if !ok {
-		// The habit vanished between the toggle and the re-read; ask the page
-		// to reload rather than swapping in something inconsistent.
-		w.Header().Set("HX-Refresh", "true")
-		w.WriteHeader(http.StatusOK)
-
-		return
-	}
-
-	gridDay, ok := findDay(grid, day.Format("2006-01-02"))
-	if !ok {
+	row, found := findRow(view, habitID)
+	if !found {
+		// The habit left this day between the tap and the re-read; reload
+		// rather than swap in something inconsistent.
 		w.Header().Set("HX-Refresh", "true")
 		w.WriteHeader(http.StatusOK)
 
@@ -95,414 +72,183 @@ func (s *Server) renderTickFragment(w http.ResponseWriter, r *http.Request, resu
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 
-	if err := views.TickCell(grid, habit, gridDay, participant).Render(ctx(r), w); err != nil {
-		s.logger.Error("render tick fragment", "error", err)
+	if err := views.TickResponse(view, row).Render(ctx(r), w); err != nil {
+		s.logger.Error("render tick", "error", err)
 
 		return
 	}
 
+	celebration := views.ClearCelebration()
 	if result.JustAchieved != nil {
-		component := views.Celebration(result.Person.ID, result.Person.Name, result.JustAchieved.Name)
-		if err := component.Render(ctx(r), w); err != nil {
-			s.logger.Error("render celebration", "error", err)
-		}
-
-		return
+		celebration = views.Celebration(result.Person, *result.JustAchieved)
 	}
 
-	if err := views.ClearCelebration().Render(ctx(r), w); err != nil {
-		s.logger.Error("clear celebration", "error", err)
+	if err := celebration.Render(ctx(r), w); err != nil {
+		s.logger.Error("render celebration", "error", err)
 	}
 }
 
-// findHabit locates a habit and its participant within a rebuilt grid.
-func findHabit(grid service.Grid, habitID int64) (service.GridParticipant, service.GridHabit, bool) {
-	for _, participant := range grid.Participants {
-		for _, habit := range participant.Habits {
-			if habit.Habit.ID == habitID {
-				return participant, habit, true
-			}
+// findRow locates a habit's row in a day.
+func findRow(view service.DayView, habitID int64) (service.DayHabit, bool) {
+	for _, row := range view.Habits {
+		if row.Habit.ID == habitID {
+			return row, true
 		}
 	}
 
-	return service.GridParticipant{}, service.GridHabit{}, false
+	return service.DayHabit{}, false
 }
 
-// findDay locates a column by its ISO date.
-func findDay(grid service.Grid, iso string) (service.GridDay, bool) {
-	for _, day := range grid.Days {
-		if day.ISO == iso {
-			return day, true
-		}
+/* ——— A person's habits ————————————————————————————————————————— */
+
+func (s *Server) addHabit(w http.ResponseWriter, r *http.Request) {
+	personID, ok := s.personParam(w, r)
+	if !ok || !s.form(w, r) {
+		return
 	}
 
-	return service.GridDay{}, false
+	habit, err := s.service.AddHabit(ctx(r), personID, field(r, "name"))
+	if s.reportError(w, r, err, views.PersonHref(personID)) {
+		return
+	}
+
+	s.succeed(w, r, "Added “"+habit.Name+"”, starting today", views.PersonHref(personID))
 }
 
-/* ——— Sprint lifecycle —————————————————————————————————————————— */
-
-// startSprint opens a sprint from the family-meeting form.
-func (s *Server) startSprint(w http.ResponseWriter, r *http.Request) {
-	if !s.form(w, r) {
+func (s *Server) renameHabit(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.idParam(w, r, "habit")
+	if !ok || !s.form(w, r) {
 		return
 	}
 
-	start, err := dateField(r, "start_date")
-	if err != nil {
-		s.reportError(w, r, err, "/settings")
-
+	habit, err := s.service.RenameHabit(ctx(r), id, field(r, "name"))
+	if s.reportError(w, r, err, "/") {
 		return
 	}
 
-	end, err := dateField(r, "end_date")
-	if err != nil {
-		s.reportError(w, r, err, "/settings")
-
-		return
-	}
-
-	var participants []service.ParticipantInput
-
-	for _, raw := range r.PostForm["person_ids"] {
-		personID, err := parseInt64(raw)
-		if err != nil {
-			continue
-		}
-
-		participants = append(participants, service.ParticipantInput{
-			PersonID: personID,
-			Habits:   habitInputs(habitLines(field(r, "habits_"+raw))),
-			Reward:   rewardChoice(r, raw),
-		})
-	}
-
-	if len(participants) == 0 {
-		s.reportError(w, r, domain.Invalid("participants", "Pick at least one person for the sprint."), "/settings")
-
-		return
-	}
-
-	if _, err := s.service.StartSprint(ctx(r), start, end, participants); s.reportError(w, r, err, "/settings") {
-		return
-	}
-
-	setFlash(w, "success", "Sprint started")
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	s.succeed(w, r, "Renamed to “"+habit.Name+"”", views.EditHref(habit.PersonID))
 }
 
-// habitInputs turns habit names into service inputs, numbering them in the
-// order they were typed.
-func habitInputs(names []string) []service.HabitInput {
-	inputs := make([]service.HabitInput, 0, len(names))
-
-	for index, name := range names {
-		inputs = append(inputs, service.HabitInput{Name: name, DisplayOrder: index + 1})
+func (s *Server) moveHabit(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.idParam(w, r, "habit")
+	if !ok || !s.form(w, r) {
+		return
 	}
 
-	return inputs
+	if err := s.service.MoveHabit(ctx(r), id, direction(r)); s.reportError(w, r, err, "/") {
+		return
+	}
+
+	s.redirectBack(w, r, "/")
 }
 
-// rewardChoice reads one person's reward decision out of the sprint form.
-func rewardChoice(r *http.Request, personKey string) service.RewardChoice {
-	mode := field(r, "reward_mode_"+personKey)
-	if mode == "" {
-		mode = service.RewardKeepCurrent
+func (s *Server) stopHabit(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.idParam(w, r, "habit")
+	if !ok {
+		return
 	}
 
-	return service.RewardChoice{
-		Mode: mode,
-		Name: field(r, "reward_name_"+personKey),
-		Cost: intField(r, "reward_cost_"+personKey, 0),
+	habit, err := s.service.StopHabit(ctx(r), id)
+	if s.reportError(w, r, err, "/") {
+		return
 	}
+
+	s.succeed(w, r, "Stopped “"+habit.Name+"”. Its ticks stay in the history.", views.EditHref(habit.PersonID))
 }
 
-// endSprint archives the running sprint.
-func (s *Server) endSprint(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "sprint")
-	if err != nil {
-		s.notFound(w, r)
-
+func (s *Server) restartHabit(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.idParam(w, r, "habit")
+	if !ok {
 		return
 	}
 
-	if _, err := s.service.EndSprint(ctx(r), id); s.reportError(w, r, err, "/settings") {
+	habit, err := s.service.RestartHabit(ctx(r), id)
+	if s.reportError(w, r, err, "/") {
 		return
 	}
 
-	setFlash(w, "success", "Sprint archived. You can start a new one.")
-	http.Redirect(w, r, "/settings", http.StatusSeeOther)
+	s.succeed(w, r, "“"+habit.Name+"” is running again", views.EditHref(habit.PersonID))
 }
 
-// addParticipant enrols someone into a sprint already under way.
-func (s *Server) addParticipant(w http.ResponseWriter, r *http.Request) {
-	sprintID, err := pathID(r, "sprint")
-	if err != nil {
-		s.notFound(w, r)
+/* ——— Goals and points —————————————————————————————————————————— */
 
+func (s *Server) setGoal(w http.ResponseWriter, r *http.Request) {
+	personID, ok := s.personParam(w, r)
+	if !ok || !s.form(w, r) {
 		return
 	}
 
-	if !s.form(w, r) {
-		return
-	}
-
-	personID, err := parseInt64(field(r, "person_id"))
-	if err != nil {
-		s.reportError(w, r, domain.Invalid("person_id", "Choose who is joining."), "/settings")
-
-		return
-	}
-
-	input := service.ParticipantInput{
-		PersonID: personID,
-		Habits:   habitInputs(habitLines(field(r, "habits"))),
-		Reward:   service.RewardChoice{Mode: service.RewardKeepCurrent},
-	}
-
-	if _, err := s.service.AddParticipant(ctx(r), sprintID, input); s.reportError(w, r, err, "/settings") {
-		return
-	}
-
-	s.succeed(w, r, "Added to the sprint", "/settings")
-}
-
-/* ——— People ———————————————————————————————————————————————————— */
-
-func (s *Server) createPerson(w http.ResponseWriter, r *http.Request) {
-	if !s.form(w, r) {
-		return
-	}
-
-	_, err := s.service.CreatePerson(ctx(r), field(r, "name"), optionalIntField(r, "display_order"))
-	if s.reportError(w, r, err, "/settings?tab=people") {
-		return
-	}
-
-	s.succeed(w, r, "Person added", "/settings?tab=people")
-}
-
-func (s *Server) updatePerson(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "person")
-	if err != nil {
-		s.notFound(w, r)
-
-		return
-	}
-
-	if !s.form(w, r) {
-		return
-	}
-
-	_, err = s.service.UpdatePerson(ctx(r), id, field(r, "name"), intField(r, "display_order", 0))
-	if s.reportError(w, r, err, "/settings?tab=people") {
-		return
-	}
-
-	s.succeed(w, r, "Saved", "/settings?tab=people")
-}
-
-func (s *Server) archivePerson(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "person")
-	if err != nil {
-		s.notFound(w, r)
-
-		return
-	}
-
-	if err := s.service.ArchivePerson(ctx(r), id); s.reportError(w, r, err, "/settings?tab=people") {
-		return
-	}
-
-	s.succeed(w, r, "Person removed. Their history is kept.", "/settings?tab=people")
-}
-
-/* ——— Habits ———————————————————————————————————————————————————— */
-
-func (s *Server) createHabit(w http.ResponseWriter, r *http.Request) {
-	participantID, err := pathID(r, "participant")
-	if err != nil {
-		s.notFound(w, r)
-
-		return
-	}
-
-	if !s.form(w, r) {
-		return
-	}
-
-	_, err = s.service.CreateHabit(ctx(r), participantID, field(r, "name"), optionalIntField(r, "display_order"))
-	if s.reportError(w, r, err, "/settings") {
-		return
-	}
-
-	s.succeed(w, r, "Habit added", "/settings")
-}
-
-func (s *Server) updateHabit(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "habit")
-	if err != nil {
-		s.notFound(w, r)
-
-		return
-	}
-
-	if !s.form(w, r) {
-		return
-	}
-
-	habit, err := s.service.Store().Habit(ctx(r), id)
-	if s.reportError(w, r, err, "/settings") {
-		return
-	}
-
-	order := intField(r, "display_order", habit.DisplayOrder)
-
-	if _, err := s.service.UpdateHabit(ctx(r), id, field(r, "name"), order); s.reportError(w, r, err, "/settings") {
-		return
-	}
-
-	s.succeed(w, r, "Habit saved", "/settings")
-}
-
-func (s *Server) archiveHabit(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "habit")
-	if err != nil {
-		s.notFound(w, r)
-
-		return
-	}
-
-	if err := s.service.ArchiveHabit(ctx(r), id); s.reportError(w, r, err, "/settings") {
-		return
-	}
-
-	s.succeed(w, r, "Habit removed. Its ticks still count.", "/settings")
-}
-
-/* ——— Rewards ——————————————————————————————————————————————————— */
-
-func (s *Server) createReward(w http.ResponseWriter, r *http.Request) {
-	personID, err := pathID(r, "person")
-	if err != nil {
-		s.notFound(w, r)
-
-		return
-	}
-
-	if !s.form(w, r) {
-		return
-	}
-
-	_, err = s.service.CreateReward(ctx(r), personID, field(r, "name"), intField(r, "cost", 0))
-	if s.reportError(w, r, err, "/settings?tab=rewards") {
-		return
-	}
-
-	s.succeed(w, r, "Reward added", "/settings?tab=rewards")
-}
-
-func (s *Server) updateReward(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "reward")
-	if err != nil {
-		s.notFound(w, r)
-
-		return
-	}
-
-	if !s.form(w, r) {
-		return
-	}
-
-	reward, err := s.service.Store().Reward(ctx(r), id)
-	if s.reportError(w, r, err, "/settings?tab=rewards") {
-		return
-	}
-
-	// The cost input is disabled for an achieved reward, so the browser omits
-	// it; fall back to the stored cost rather than reading it as zero.
-	cost := intField(r, "cost", reward.Cost)
-
-	if _, err := s.service.UpdateReward(ctx(r), id, field(r, "name"), cost); s.reportError(w, r, err, "/settings?tab=rewards") {
-		return
-	}
-
-	s.succeed(w, r, "Reward saved", "/settings?tab=rewards")
-}
-
-func (s *Server) deleteReward(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r, "reward")
-	if err != nil {
-		s.notFound(w, r)
-
-		return
-	}
-
-	if err := s.service.DeleteReward(ctx(r), id); s.reportError(w, r, err, "/settings?tab=rewards") {
-		return
-	}
-
-	s.succeed(w, r, "Reward deleted", "/settings?tab=rewards")
-}
-
-func (s *Server) setActiveReward(w http.ResponseWriter, r *http.Request) {
-	participantID, err := pathID(r, "participant")
-	if err != nil {
-		s.notFound(w, r)
-
-		return
-	}
-
-	if !s.form(w, r) {
-		return
-	}
-
-	var rewardID *int64
-
-	if raw := field(r, "reward_id"); raw != "" {
-		parsed, err := parseInt64(raw)
-		if err != nil {
-			s.reportError(w, r, domain.Invalid("reward_id", "Choose a valid reward."), "/settings")
-
-			return
-		}
-
-		rewardID = &parsed
-	}
-
-	achieved, err := s.service.SetActiveReward(ctx(r), participantID, rewardID)
-	if s.reportError(w, r, err, "/settings") {
+	goal, achieved, err := s.service.SetGoal(ctx(r), personID, field(r, "name"), intField(r, "cost", 0))
+	if s.reportError(w, r, err, views.PersonHref(personID)) {
 		return
 	}
 
 	if achieved != nil {
-		s.succeed(w, r, "Already earned — "+achieved.Name+" is yours!", "/settings")
+		s.succeed(w, r, "Already earned: "+achieved.Name+" is yours!", views.PersonHref(personID))
 
 		return
 	}
 
-	s.succeed(w, r, "Reward updated", "/settings")
+	s.succeed(w, r, "Now saving for "+goal.Name, views.PersonHref(personID))
 }
 
-/* ——— Points ———————————————————————————————————————————————————— */
+func (s *Server) updateReward(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.idParam(w, r, "reward")
+	if !ok || !s.form(w, r) {
+		return
+	}
+
+	reward, err := s.service.Store().Reward(ctx(r), id)
+	if s.reportError(w, r, err, "/") {
+		return
+	}
+
+	// An achieved goal's cost cannot change, so a form that leaves it out keeps
+	// the stored cost rather than reading it as zero.
+	cost := intField(r, "cost", reward.Cost)
+
+	_, achieved, err := s.service.UpdateReward(ctx(r), id, field(r, "name"), cost)
+	if s.reportError(w, r, err, views.EditHref(reward.PersonID)) {
+		return
+	}
+
+	if achieved != nil {
+		s.succeed(w, r, "Already earned: "+achieved.Name+" is yours!", views.EditHref(reward.PersonID))
+
+		return
+	}
+
+	s.succeed(w, r, "Goal saved", views.EditHref(reward.PersonID))
+}
+
+func (s *Server) deleteReward(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.idParam(w, r, "reward")
+	if !ok {
+		return
+	}
+
+	reward, err := s.service.DeleteReward(ctx(r), id)
+	if s.reportError(w, r, err, "/") {
+		return
+	}
+
+	s.succeed(w, r, "Goal removed", views.EditHref(reward.PersonID))
+}
 
 // createAdjustment records a deduction. The form collects a positive number and
 // it is stored as a negative adjustment, so nobody operating the tablet has to
 // think about signs.
 func (s *Server) createAdjustment(w http.ResponseWriter, r *http.Request) {
-	participantID, err := pathID(r, "participant")
-	if err != nil {
-		s.notFound(w, r)
-
+	personID, ok := s.personParam(w, r)
+	if !ok || !s.form(w, r) {
 		return
 	}
 
-	if !s.form(w, r) {
-		return
-	}
+	back := views.PersonHref(personID)
 
 	pointsValue := intField(r, "points", 0)
 	if pointsValue < 1 || pointsValue > domain.MaxAdjustment {
-		s.reportError(w, r, domain.Invalid("points", "Enter between 1 and "+strconv.Itoa(domain.MaxAdjustment)+" points."), "/")
+		s.reportError(w, r, domain.Invalid("points", "Enter between 1 and "+strconv.Itoa(domain.MaxAdjustment)+" points."), back)
 
 		return
 	}
@@ -510,13 +256,104 @@ func (s *Server) createAdjustment(w http.ResponseWriter, r *http.Request) {
 	validator := &domain.Validator{}
 	reason := validator.OptionalText("reason", field(r, "reason"), domain.MaxReasonLen)
 
-	if err := validator.Err(); s.reportError(w, r, err, "/") {
+	if err := validator.Err(); s.reportError(w, r, err, back) {
 		return
 	}
 
-	if _, err := s.service.CreateAdjustment(ctx(r), participantID, -pointsValue, reason); s.reportError(w, r, err, "/") {
+	if _, err := s.service.CreateAdjustment(ctx(r), personID, -pointsValue, reason); s.reportError(w, r, err, back) {
 		return
 	}
 
-	s.succeed(w, r, "Deducted "+strconv.Itoa(pointsValue)+" "+views.Pluralise(pointsValue, "point", "points"), "/")
+	s.succeed(w, r, "Deducted "+strconv.Itoa(pointsValue)+" "+views.Pluralise(pointsValue, "point", "points"), back)
+}
+
+/* ——— The family list ——————————————————————————————————————————— */
+
+func (s *Server) createPerson(w http.ResponseWriter, r *http.Request) {
+	if !s.form(w, r) {
+		return
+	}
+
+	person, err := s.service.CreatePerson(ctx(r), field(r, "name"), nil)
+	if s.reportError(w, r, err, "/family") {
+		return
+	}
+
+	s.succeed(w, r, person.Name+" added", "/family")
+}
+
+func (s *Server) renamePerson(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.personParam(w, r)
+	if !ok || !s.form(w, r) {
+		return
+	}
+
+	person, err := s.service.RenamePerson(ctx(r), id, field(r, "name"))
+	if s.reportError(w, r, err, "/family") {
+		return
+	}
+
+	s.succeed(w, r, "Renamed to "+person.Name, "/family")
+}
+
+func (s *Server) movePerson(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.personParam(w, r)
+	if !ok || !s.form(w, r) {
+		return
+	}
+
+	if err := s.service.MovePerson(ctx(r), id, direction(r)); s.reportError(w, r, err, "/family") {
+		return
+	}
+
+	s.redirectBack(w, r, "/family")
+}
+
+func (s *Server) archivePerson(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.personParam(w, r)
+	if !ok {
+		return
+	}
+
+	if err := s.service.ArchivePerson(ctx(r), id); s.reportError(w, r, err, "/family") {
+		return
+	}
+
+	s.succeed(w, r, "Archived. Their history is kept.", "/family")
+}
+
+func (s *Server) restorePerson(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.personParam(w, r)
+	if !ok {
+		return
+	}
+
+	if err := s.service.RestorePerson(ctx(r), id); s.reportError(w, r, err, "/family") {
+		return
+	}
+
+	s.succeed(w, r, "Back on the family list", "/family")
+}
+
+/* ——— Helpers ——————————————————————————————————————————————————— */
+
+// idParam reads a numeric path value, answering 404 itself when it is not one.
+func (s *Server) idParam(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
+	id, err := pathID(r, name)
+	if err != nil {
+		s.notFound(w, r)
+
+		return 0, false
+	}
+
+	return id, true
+}
+
+// direction reads the up/down buttons of a list as −1 or +1.
+func direction(r *http.Request) int {
+	if field(r, "dir") == "up" {
+		return -1
+	}
+
+	return 1
 }

@@ -1,0 +1,283 @@
+package views
+
+import (
+	"time"
+
+	"github.com/el/family-habit-tracker/internal/service"
+)
+
+// DayPage is the home screen: one person, one day.
+templ DayPage(page Page, view service.DayView) {
+	@Layout(page) {
+		@FamilyStrip(view.Strip, view.Person.ID, func(id int64) string { return DayHref(id, view.Day, view.Today) }, false)
+		@DayBody(view)
+		@DeductModal(view.Person)
+	}
+}
+
+// DayBody is everything on a person's day below the family strip.
+//
+// On a phone it is one column. On a wide screen the list sits on the left and
+// the week, points and month calendar on the right; the two wrappers dissolve
+// on a phone (display: contents) so their parts interleave in reading order.
+templ DayBody(view service.DayView) {
+	<div class="ht-day" id="day">
+		<div class="ht-day-main">
+			@dayHead(view)
+			@dayBanner(view)
+			@habitList(view)
+			if view.IsToday() {
+				@addHabitForm(view)
+			}
+			@DayFoot(view, false)
+		</div>
+		<div class="ht-day-side">
+			@WeekStrip(view, false)
+			@PointsCard(view, false)
+			@DayMonth(view, false)
+		</div>
+	</div>
+}
+
+// TickResponse answers a tap from htmx: the tapped row, swapped in place, and
+// out of band everything else the tap changed. Only that row is replaced, so a
+// tap on another row that is still queued keeps its form and goes through.
+templ TickResponse(view service.DayView, row service.DayHabit) {
+	@HabitRow(view, row)
+	@DayFoot(view, true)
+	@WeekStrip(view, true)
+	@PointsCard(view, true)
+	@DayMonth(view, true)
+	@FamilyStrip(view.Strip, view.Person.ID, func(id int64) string { return DayHref(id, view.Day, view.Today) }, true)
+}
+
+// DayFoot is the day's count and the way on.
+templ DayFoot(view service.DayView, oob bool) {
+	<div
+		class="ht-day-foot"
+		id="day-foot"
+		if oob {
+			hx-swap-oob="true"
+		}
+	>
+		<span class="ht-note">{ countText(view.Done(), len(view.Habits), view.IsToday()) }</span>
+		if view.IsToday() {
+			<a class="ht-link-caps" href={ templ.SafeURL(EditHref(view.Person.ID)) }>Edit habits &amp; goal</a>
+		} else {
+			<a class="ht-link-caps" href={ templ.SafeURL(PersonHref(view.Person.ID)) }>Today ›</a>
+		}
+	</div>
+}
+
+// DayMonth is the month calendar beside the list on a wide screen.
+templ DayMonth(view service.DayView, oob bool) {
+	<section
+		class="ht-day-month"
+		id="day-month"
+		aria-label="This month"
+		if oob {
+			hx-swap-oob="true"
+		}
+	>
+		<h3 class="ht-eyebrow">{ view.Month.Label() }</h3>
+		@MonthCalendar(view.Person.ID, view.Month, view.Today)
+		<a class="ht-link-caps" href={ templ.SafeURL(MonthHref(view.Person.ID, view.Month.Month)) }>History ›</a>
+	</section>
+}
+
+// dayHead is the date with arrows to the day before and after.
+templ dayHead(view service.DayView) {
+	<div class="ht-dayhead">
+		if view.HasPrev() {
+			<a class="ht-arrow" href={ templ.SafeURL(DayHref(view.Person.ID, view.Prev(), view.Today)) } aria-label="Day before" rel="prev">‹</a>
+		} else {
+			<span class="ht-arrow" aria-hidden="true" data-off="true">‹</span>
+		}
+		<div class="ht-dayhead-text">
+			<div class="ht-eyebrow" data-today={ boolAttr(view.IsToday()) }>
+				{ dayKicker(view) }
+				if !view.IsToday() {
+					{ " · " }
+					<a href={ templ.SafeURL(PersonHref(view.Person.ID)) }>back to today</a>
+				}
+			</div>
+			<h1 class="ht-day-title">{ dayTitle(view.Day, view.Today) }</h1>
+		</div>
+		if view.IsToday() {
+			<span class="ht-arrow" aria-hidden="true" data-off="true">›</span>
+		} else {
+			<a class="ht-arrow" href={ templ.SafeURL(DayHref(view.Person.ID, view.Next(), view.Today)) } aria-label="Day after" rel="next">›</a>
+		}
+	</div>
+}
+
+// dayBanner explains what can be done on a day that is not today.
+templ dayBanner(view service.DayView) {
+	if !view.IsToday() {
+		if view.Editable {
+			<p class="ht-banner">Forgot a tick? Days up to a week back can still be ticked.</p>
+		} else {
+			<p class="ht-banner" data-tone="quiet">This day is kept as it was. These are the habits { view.Person.Name } had then.</p>
+		}
+	}
+}
+
+// habitList is the day's habits, one big box each.
+templ habitList(view service.DayView) {
+	if len(view.Habits) == 0 {
+		if view.IsToday() {
+			<p class="ht-empty-line">No habits yet. Add the first one below.</p>
+		} else {
+			<p class="ht-empty-line">{ view.Person.Name } had no habits on this day.</p>
+		}
+	} else {
+		<ul class="ht-habits">
+			for _, row := range view.Habits {
+				@HabitRow(view, row)
+			}
+		</ul>
+	}
+}
+
+// HabitRow is one habit on one day.
+//
+// The box is a real form around a real button: without JavaScript it posts and
+// the page re-renders; with it htmx swaps this row and the totals in place. The
+// button is disabled while its own tap is in flight, and taps on other rows
+// queue behind it in order. A day that can no longer be changed renders the
+// same row with the button disabled.
+templ HabitRow(view service.DayView, row service.DayHabit) {
+	<li class="ht-habit" id={ "row-" + i64toa(row.Habit.ID) } data-done={ boolAttr(row.Done) } data-locked={ boolAttr(!view.Editable) }>
+		<form
+			method="post"
+			action="/ticks"
+			hx-post="/ticks"
+			hx-target="closest li"
+			hx-swap="outerHTML"
+			hx-sync="#main:queue all"
+			hx-disabled-elt="find button"
+		>
+			<input type="hidden" name="habit_id" value={ i64toa(row.Habit.ID) }/>
+			<input type="hidden" name="tick_date" value={ ISODate(view.Day) }/>
+			<button
+				type="submit"
+				class="ht-check"
+				id={ "h-" + i64toa(row.Habit.ID) }
+				aria-pressed={ boolAttr(row.Done) }
+				aria-label={ cellLabel(row.Habit.Name, view.Day, row.Done) }
+				disabled?={ !view.Editable }
+			>
+				<span class="ht-box" aria-hidden="true"></span>
+				<span class="ht-habit-name">{ row.Habit.Name }</span>
+				if row.Streak >= 2 {
+					<span class="ht-streak" data-hot={ boolAttr(row.Streak >= 4) }>{ streakText(row.Streak) }</span>
+				}
+			</button>
+		</form>
+	</li>
+}
+
+// addHabitForm starts a new habit from today.
+templ addHabitForm(view service.DayView) {
+	<form class="ht-add" method="post" action={ templ.SafeURL(PersonHref(view.Person.ID) + "/habits") }>
+		<label class="ht-sr" for="new-habit">New habit for { view.Person.Name }</label>
+		<input class="ht-input" id="new-habit" type="text" name="name" maxlength="80" required placeholder={ "Add a habit for " + view.Person.Name + "…" } autocomplete="off"/>
+		<button type="submit" class="ht-btn">Add</button>
+	</form>
+}
+
+// WeekStrip is the seven days around the one shown, each with a ring for how
+// much was done.
+templ WeekStrip(view service.DayView, oob bool) {
+	<nav
+		class="ht-week"
+		id="week"
+		aria-label="This week"
+		if oob {
+			hx-swap-oob="true"
+		}
+	>
+		for _, cell := range view.Week {
+			if cell.IsFuture || cell.Date.Before(view.Earliest) {
+				<span class="ht-week-day" data-off="true">
+					<span class="ht-week-dow">{ dowLetter(cell.Date) }</span>
+					<span class="ht-week-num">{ itoa(cell.Date.Day()) }</span>
+					<span class="ht-dot" style={ dotStyle(0) }></span>
+				</span>
+			} else {
+				<a
+					class="ht-week-day"
+					href={ templ.SafeURL(DayHref(view.Person.ID, cell.Date, view.Today)) }
+					data-selected={ boolAttr(cell.IsSelected) }
+					data-today={ boolAttr(cell.IsToday) }
+					aria-label={ cell.Date.Format("Monday 2 January") + ": " + countText(cell.Done, cell.Total, false) }
+				>
+					<span class="ht-week-dow">{ dowLetter(cell.Date) }</span>
+					<span class="ht-week-num">{ itoa(cell.Date.Day()) }</span>
+					<span class="ht-dot" style={ dotStyle(cell.Percent()) }></span>
+				</a>
+			}
+		}
+	</nav>
+}
+
+// PointsCard is the person's balance and the goal they are saving for.
+templ PointsCard(view service.DayView, oob bool) {
+	<section
+		class="ht-points"
+		id="points"
+		aria-label="Points"
+		if oob {
+			hx-swap-oob="true"
+		}
+	>
+		<div class="ht-points-row">
+			<span class="ht-num">{ itoa(view.Balance) }</span>
+			<span class="ht-note">{ pointsOf(view.Goal) }</span>
+			<button type="button" class="ht-deduct" data-modal-open="deduct">
+				{ "− deduct" }
+				<span class="ht-sr">{ " points from " + view.Person.Name }</span>
+			</button>
+		</div>
+		if view.Goal != nil {
+			<p class="ht-note">Saving for <b>{ view.Goal.Name }</b> · { itoa(view.GoalPercent()) }%</p>
+			<div class="ht-track"><i style={ widthStyle(view.GoalPercent()) }></i></div>
+		} else {
+			<p class="ht-note">No goal yet. Points keep counting.</p>
+			@GoalForm(view.Person)
+		}
+	</section>
+}
+
+// MonthCalendar is a month as a grid of days, each shaded by how much of that
+// day's list was done. Past days link to the day.
+templ MonthCalendar(personID int64, grid service.MonthGrid, today time.Time) {
+	<div class="ht-cal" role="grid" aria-label={ grid.Label() }>
+		for _, letter := range []string{"M", "T", "W", "T", "F", "S", "S"} {
+			<span class="ht-cal-dow" aria-hidden="true">{ letter }</span>
+		}
+		for _, week := range grid.Weeks {
+			for _, cell := range week {
+				if !cell.InMonth {
+					<span class="ht-cal-day" data-pad="true"></span>
+				} else if cell.IsFuture {
+					<span class="ht-cal-day" data-future="true"><span>{ itoa(cell.Date.Day()) }</span></span>
+				} else {
+					<a
+						class="ht-cal-day"
+						href={ templ.SafeURL(DayHref(personID, cell.Date, today)) }
+						data-level={ cell.Level() }
+						data-today={ boolAttr(cell.IsToday) }
+						data-selected={ boolAttr(cell.IsSelected) }
+						aria-label={ cell.Date.Format("2 January") + ": " + countText(cell.Done, cell.Total, false) }
+					>
+						<span>{ itoa(cell.Date.Day()) }</span>
+						if cell.Done > 0 {
+							<b>{ itoa(cell.Done) }</b>
+						}
+					</a>
+				}
+			}
+		}
+	</div>
+}

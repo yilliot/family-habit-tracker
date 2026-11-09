@@ -49,23 +49,6 @@ func (s *Store) Reward(ctx context.Context, id int64) (domain.Reward, error) {
 	return r, nil
 }
 
-// RewardByIDPtr resolves an optional reward reference.
-func (s *Store) RewardByIDPtr(ctx context.Context, id *int64) (*domain.Reward, error) {
-	if id == nil {
-		return nil, nil
-	}
-
-	r, err := s.Reward(ctx, *id)
-	if errors.Is(err, ErrNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	return &r, nil
-}
-
 // ActiveRewardForPerson returns the person's current un-achieved goal, or nil
 // when they are between rewards.
 func (s *Store) ActiveRewardForPerson(ctx context.Context, personID int64) (*domain.Reward, error) {

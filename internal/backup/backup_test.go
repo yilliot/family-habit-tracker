@@ -76,12 +76,18 @@ func TestSnapshotIsACompleteStandaloneCopy(t *testing.T) {
 	}
 
 	// A snapshot must be usable as the app's database, which is what a restore
-	// actually does with it.
+	// actually does with it. It must keep the schema version too, or opening it
+	// would run the upgrade steps again over tables they already changed.
 	restored, err := db.Open(t.Context(), path)
 	if err != nil {
 		t.Fatalf("open snapshot as the app would: %v", err)
 	}
-	restored.Close()
+	defer restored.Close()
+
+	var version int
+	if err := restored.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != db.SchemaVersion {
+		t.Errorf("snapshot schema version = %d (%v), want %d", version, err, db.SchemaVersion)
+	}
 }
 
 // Snapshots taken while the family is ticking must each be sound, and none may

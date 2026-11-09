@@ -1,0 +1,121 @@
+package views
+
+import "github.com/el/family-habit-tracker/internal/service"
+
+// EditPage is where a person's habits are renamed, reordered, stopped and
+// restarted, and their goal is set. Every change saves on its own.
+templ EditPage(page Page, view service.EditView) {
+	@Layout(page) {
+		@FamilyStrip(view.Strip, view.Person.ID, EditHref, false)
+		<div class="ht-sheet">
+			<div class="ht-dayhead">
+				<a class="ht-arrow" href={ templ.SafeURL(PersonHref(view.Person.ID)) } aria-label={ "Back to " + view.Person.Name + "'s day" }>‹</a>
+				<div class="ht-dayhead-text">
+					<div class="ht-eyebrow">{ view.Person.Name }</div>
+					<h1 class="ht-day-title">Edit habits &amp; goal</h1>
+				</div>
+				<span class="ht-arrow" aria-hidden="true" data-off="true"></span>
+			</div>
+			<section class="ht-section" aria-labelledby="running-title">
+				<h2 class="ht-eyebrow" id="running-title">Running</h2>
+				if len(view.Running) == 0 {
+					<p class="ht-empty-line">No habits running. Add one below.</p>
+				} else {
+					<ul class="ht-edit-list">
+						for index, habit := range view.Running {
+							<li class="ht-edit-row">
+								<form method="post" action={ templ.SafeURL("/habits/" + i64toa(habit.ID) + "/move") }>
+									<input type="hidden" name="dir" value="up"/>
+									<button class="ht-mini" type="submit" disabled?={ index == 0 } aria-label={ "Move " + habit.Name + " up" }>↑</button>
+								</form>
+								<form method="post" action={ templ.SafeURL("/habits/" + i64toa(habit.ID) + "/move") }>
+									<input type="hidden" name="dir" value="down"/>
+									<button class="ht-mini" type="submit" disabled?={ index == len(view.Running)-1 } aria-label={ "Move " + habit.Name + " down" }>↓</button>
+								</form>
+								<form class="ht-rename" method="post" action={ templ.SafeURL("/habits/" + i64toa(habit.ID)) }>
+									<label class="ht-sr" for={ "name-" + i64toa(habit.ID) }>{ "Name of " + habit.Name }</label>
+									<input class="ht-input" id={ "name-" + i64toa(habit.ID) } type="text" name="name" value={ habit.Name } maxlength="80" required/>
+									<button class="ht-mini ht-save" type="submit" aria-label={ "Save the name of " + habit.Name }>✓</button>
+								</form>
+								@ConfirmButton(
+									"stop-"+i64toa(habit.ID),
+									"Stop",
+									"Stop habit · "+view.Person.Name,
+									"“"+habit.Name+"” leaves "+view.Person.Name+"'s list. Its ticks and points stay, and it can be restarted any time.",
+									"Stop habit",
+									"/habits/"+i64toa(habit.ID)+"/stop",
+								)
+							</li>
+						}
+					</ul>
+				}
+				<form class="ht-add" method="post" action={ templ.SafeURL(PersonHref(view.Person.ID) + "/habits") }>
+					<label class="ht-sr" for="new-habit">New habit for { view.Person.Name }</label>
+					<input class="ht-input" id="new-habit" type="text" name="name" maxlength="80" required placeholder={ "Add a habit for " + view.Person.Name + "…" } autocomplete="off"/>
+					<button type="submit" class="ht-btn">Add</button>
+				</form>
+			</section>
+			if len(view.Stopped) > 0 {
+				<section class="ht-section" aria-labelledby="stopped-title">
+					<h2 class="ht-eyebrow" id="stopped-title">Stopped earlier</h2>
+					<ul class="ht-lines">
+						for _, stopped := range view.Stopped {
+							<li class="ht-line">
+								<span class="ht-line-name">{ stopped.Habit.Name }</span>
+								<span class="ht-note">{ spanText(stopped, view.Today) }</span>
+								<form method="post" action={ templ.SafeURL("/habits/" + i64toa(stopped.Habit.ID) + "/restart") }>
+									<button class="ht-btn-line" type="submit">Restart</button>
+								</form>
+							</li>
+						}
+					</ul>
+				</section>
+			}
+			<section class="ht-section" aria-labelledby="goal-title">
+				<h2 class="ht-eyebrow" id="goal-title">Goal</h2>
+				<p class="ht-note">{ goalProgress(view.Goal, view.Balance) }</p>
+				if view.Goal != nil {
+					<div class="ht-track"><i style={ widthStyle(view.GoalPercent()) }></i></div>
+					<form class="ht-goal-form" id="goal" method="post" action={ templ.SafeURL("/rewards/" + i64toa(view.Goal.ID)) }>
+						<label class="ht-field ht-grow">
+							<span class="ht-label">Saving for</span>
+							<input class="ht-input" type="text" name="name" value={ view.Goal.Name } maxlength="80" required/>
+						</label>
+						<label class="ht-field ht-cost">
+							<span class="ht-label">Points</span>
+							<input class="ht-input" type="number" name="cost" value={ itoa(view.Goal.Cost) } min="1" max="9999" required inputmode="numeric"/>
+						</label>
+						<button type="submit" class="ht-btn">Save</button>
+					</form>
+					<div class="ht-right">
+						@ConfirmButton(
+							"drop-goal",
+							"Remove goal",
+							"Remove goal · "+view.Person.Name,
+							"“"+view.Goal.Name+"” is removed. "+view.Person.Name+"'s points stay as they are.",
+							"Remove goal",
+							"/rewards/"+i64toa(view.Goal.ID)+"/delete",
+						)
+					</div>
+				} else {
+					@GoalForm(view.Person)
+				}
+				if len(view.Achieved) > 0 {
+					<h3 class="ht-eyebrow ht-gap">Goals reached</h3>
+					<ul class="ht-lines">
+						for _, reward := range view.Achieved {
+							<li class="ht-line">
+								<span class="ht-line-name">{ reward.Name }</span>
+								<span class="ht-note">{ reachedText(reward, view.Today) }</span>
+							</li>
+						}
+					</ul>
+				}
+			</section>
+			<div class="ht-day-foot">
+				<span class="ht-note">Changes save as you go.</span>
+				<a class="ht-link-caps" href={ templ.SafeURL(PersonHref(view.Person.ID)) }>Done</a>
+			</div>
+		</div>
+	}
+}

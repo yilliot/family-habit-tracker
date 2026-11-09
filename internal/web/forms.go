@@ -44,22 +44,6 @@ func intField(r *http.Request, name string, fallback int) int {
 	return value
 }
 
-// optionalIntField reads an integer form value, yielding nil when absent so the
-// service layer can apply its own default.
-func optionalIntField(r *http.Request, name string) *int {
-	raw := field(r, name)
-	if raw == "" {
-		return nil
-	}
-
-	value, err := strconv.Atoi(raw)
-	if err != nil {
-		return nil
-	}
-
-	return &value
-}
-
 // dateField reads a date input as a day in UTC.
 func dateField(r *http.Request, name string) (time.Time, error) {
 	parsed, err := time.ParseInLocation("2006-01-02", field(r, name), time.UTC)
@@ -68,20 +52,4 @@ func dateField(r *http.Request, name string) (time.Time, error) {
 	}
 
 	return parsed, nil
-}
-
-// habitLines turns the "one habit per line" editor into habit inputs, dropping
-// blank lines and trimming stray whitespace so a trailing newline does not
-// create an empty habit.
-func habitLines(raw string) []string {
-	var names []string
-
-	for _, line := range strings.Split(raw, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" {
-			names = append(names, trimmed)
-		}
-	}
-
-	return names
 }

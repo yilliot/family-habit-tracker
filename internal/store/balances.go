@@ -7,50 +7,29 @@ import (
 	"time"
 
 	"github.com/el/family-habit-tracker/internal/db"
+	"github.com/el/family-habit-tracker/internal/domain"
 )
 
 // Balances are always derived from ticks, rewards and adjustments at read
 // time; no running total is ever persisted. That keeps a corrected tick or an
 // edited reward cost from leaving a stale number behind.
 //
-// Ticks belonging to soft-deleted habits are deliberately still counted. A
-// habit removed from the grid mid-sprint keeps the points it already earned,
-// which is the behaviour the family expects: you do not lose points because a
-// habit was retired.
+// Ticks on stopped habits still count: you do not lose points because a habit
+// was retired.
 
-// TicksEarnedByPerson counts every point a person has ever earned, across all
-// sprints and including habits that have since been removed from the grid.
+// TicksEarnedByPerson counts every point a person has ever earned.
 func (s *Store) TicksEarnedByPerson(ctx context.Context, personID int64) (int, error) {
 	var count int
 
 	err := s.q.QueryRowContext(ctx,
 		`SELECT COUNT(*)
-		   FROM ticks t
-		   JOIN habits h              ON h.id  = t.habit_id
-		   JOIN sprint_participants sp ON sp.id = h.sprint_participant_id
-		  WHERE sp.person_id = ?`,
+		   FROM habits h
+		   JOIN ticks t ON t.habit_id = h.id
+		  WHERE h.person_id = ?`,
 		personID,
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count lifetime ticks for person %d: %w", personID, err)
-	}
-
-	return count, nil
-}
-
-// TicksEarnedByParticipant counts the points earned inside one sprint.
-func (s *Store) TicksEarnedByParticipant(ctx context.Context, participantID int64) (int, error) {
-	var count int
-
-	err := s.q.QueryRowContext(ctx,
-		`SELECT COUNT(*)
-		   FROM ticks t
-		   JOIN habits h ON h.id = t.habit_id
-		  WHERE h.sprint_participant_id = ?`,
-		participantID,
-	).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("count sprint ticks for participant %d: %w", participantID, err)
 	}
 
 	return count, nil
@@ -71,35 +50,12 @@ func (s *Store) SpentByPerson(ctx context.Context, personID int64) (int, error) 
 	return int(total.Int64), nil
 }
 
-// SpentByPersonSince totals rewards a person achieved at or after an instant.
-// Comparing through datetime() normalises the stored text, so rows written in
-// any of the legacy timestamp formats still compare correctly.
-func (s *Store) SpentByPersonSince(ctx context.Context, personID int64, since time.Time) (int, error) {
-	var total sql.NullInt64
-
-	err := s.q.QueryRowContext(ctx,
-		`SELECT SUM(cost) FROM rewards
-		  WHERE person_id = ?
-		    AND achieved_at IS NOT NULL
-		    AND datetime(achieved_at) >= datetime(?)`,
-		personID, db.FormatTime(since),
-	).Scan(&total)
-	if err != nil {
-		return 0, fmt.Errorf("sum spent since for person %d: %w", personID, err)
-	}
-
-	return int(total.Int64), nil
-}
-
-// AdjustmentTotalByPerson sums a person's manual corrections across all sprints.
+// AdjustmentTotalByPerson sums a person's manual corrections.
 func (s *Store) AdjustmentTotalByPerson(ctx context.Context, personID int64) (int, error) {
 	var total sql.NullInt64
 
 	err := s.q.QueryRowContext(ctx,
-		`SELECT SUM(pa.amount)
-		   FROM point_adjustments pa
-		   JOIN sprint_participants sp ON sp.id = pa.sprint_participant_id
-		  WHERE sp.person_id = ?`,
+		`SELECT SUM(amount) FROM point_adjustments WHERE person_id = ?`,
 		personID,
 	).Scan(&total)
 	if err != nil {
@@ -109,17 +65,64 @@ func (s *Store) AdjustmentTotalByPerson(ctx context.Context, personID int64) (in
 	return int(total.Int64), nil
 }
 
-// AdjustmentTotalByParticipant sums one enrolment's manual corrections.
-func (s *Store) AdjustmentTotalByParticipant(ctx context.Context, participantID int64) (int, error) {
-	var total sql.NullInt64
+// CreateAdjustment records a signed correction to a person's balance.
+func (s *Store) CreateAdjustment(ctx context.Context, personID int64, amount int, reason *string) (domain.PointAdjustment, error) {
+	now := s.Now()
 
-	err := s.q.QueryRowContext(ctx,
-		`SELECT SUM(amount) FROM point_adjustments WHERE sprint_participant_id = ?`,
-		participantID,
-	).Scan(&total)
+	res, err := s.q.ExecContext(ctx,
+		`INSERT INTO point_adjustments (person_id, amount, reason, created_at) VALUES (?, ?, ?, ?)`,
+		personID, amount, nullString(reason), db.FormatTime(now),
+	)
 	if err != nil {
-		return 0, fmt.Errorf("sum adjustments for participant %d: %w", participantID, err)
+		return domain.PointAdjustment{}, fmt.Errorf("insert adjustment: %w", err)
 	}
 
-	return int(total.Int64), nil
+	id, err := res.LastInsertId()
+	if err != nil {
+		return domain.PointAdjustment{}, fmt.Errorf("insert adjustment id: %w", err)
+	}
+
+	return domain.PointAdjustment{ID: id, PersonID: personID, Amount: amount, Reason: reason, CreatedAt: now}, nil
+}
+
+// AdjustmentsForPerson lists a person's corrections made in [from, to), newest
+// first.
+func (s *Store) AdjustmentsForPerson(ctx context.Context, personID int64, from, to time.Time) ([]domain.PointAdjustment, error) {
+	rows, err := s.q.QueryContext(ctx,
+		`SELECT id, amount, reason, created_at FROM point_adjustments
+		  WHERE person_id = ? AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)
+		  ORDER BY datetime(created_at) DESC, id DESC`,
+		personID, db.FormatTime(from), db.FormatTime(to),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list adjustments for person %d: %w", personID, err)
+	}
+	defer rows.Close()
+
+	var adjustments []domain.PointAdjustment
+	for rows.Next() {
+		var (
+			adjustment = domain.PointAdjustment{PersonID: personID}
+			reason     sql.NullString
+			createdAt  sql.NullString
+		)
+
+		if err := rows.Scan(&adjustment.ID, &adjustment.Amount, &reason, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan adjustment: %w", err)
+		}
+
+		adjustment.Reason = toStringPtr(reason)
+
+		created, err := db.ScanTime(createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("adjustment %d created_at: %w", adjustment.ID, err)
+		}
+		if created != nil {
+			adjustment.CreatedAt = *created
+		}
+
+		adjustments = append(adjustments, adjustment)
+	}
+
+	return adjustments, rows.Err()
 }

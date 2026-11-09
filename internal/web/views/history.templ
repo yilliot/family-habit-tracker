@@ -2,55 +2,97 @@ package views
 
 import "github.com/el/family-habit-tracker/internal/service"
 
-// HistoryIndex lists finished sprints, newest first.
-templ HistoryIndex(page Page, entries []service.HistoryEntry) {
+// HistoryPage is one person's month: a calendar shaded by how much was done
+// each day, the month's ticks by habit, and their goals. It reaches back to the
+// first day they had a habit, sprints included.
+templ HistoryPage(page Page, view service.MonthView) {
 	@Layout(page) {
-		<div class="ht-narrow ht-stack">
-			<h2 class="ht-section-title">Past sprints</h2>
-			if len(entries) == 0 {
-				@EmptyState(
-					"No archived sprints yet",
-					"Your first sprint is still in progress — finish it from Settings and it will be filed here.",
-				) {
-					<a class="ht-btn ht-btn-terracotta" href="/">Back to tracker</a>
+		@FamilyStrip(view.Strip, view.Person.ID, func(id int64) string { return MonthHref(id, view.Grid.Month) }, false)
+		<div class="ht-sheet">
+			<div class="ht-dayhead">
+				if view.HasPrev() {
+					<a class="ht-arrow" href={ templ.SafeURL(MonthHref(view.Person.ID, view.Prev())) } aria-label="Month before" rel="prev">‹</a>
+				} else {
+					<span class="ht-arrow" aria-hidden="true" data-off="true">‹</span>
 				}
-			} else {
-				<ul class="ht-stack-sm">
-					for _, entry := range entries {
-						<li class="ht-progress-card ht-row-between">
-							<div>
-								<div class="ht-card-title">
-									{ FormatRange(entry.Sprint.StartDate, entry.Sprint.EndDate) }
-								</div>
-								<div class="ht-note">{ HistorySummary(entry) }</div>
-								if len(entry.Achievers) > 0 {
-									<div class="ht-note" style="color:var(--ink-2);margin-top:4px">
-										{ AchieverSummary(entry.Achievers) }
-									</div>
-								}
-							</div>
-							<a class="ht-btn ht-btn-ghost" href={ templ.SafeURL("/history/" + i64toa(entry.Sprint.ID)) }>
-								View
-							</a>
-						</li>
-					}
-				</ul>
-			}
-		</div>
-	}
-}
-
-// HistoryShow renders one archived sprint as a read-only ledger.
-templ HistoryShow(page Page, grid service.Grid) {
-	@Layout(page) {
-		<div class="ht-stack">
-			<div class="ht-row-between ht-no-print">
-				<a class="ht-eyebrow" href="/history">← Back to history</a>
-				<button type="button" class="ht-btn ht-btn-ghost" onclick="window.print()">Print this sprint</button>
+				<div class="ht-dayhead-text">
+					<div class="ht-eyebrow">{ view.Person.Name } · History</div>
+					<h1 class="ht-day-title">{ view.Grid.Label() }</h1>
+				</div>
+				if view.HasNext() {
+					<a class="ht-arrow" href={ templ.SafeURL(MonthHref(view.Person.ID, view.Next())) } aria-label="Month after" rel="next">›</a>
+				} else {
+					<span class="ht-arrow" aria-hidden="true" data-off="true">›</span>
+				}
 			</div>
-			@ProgressStrip(grid)
-			@SprintGrid(grid)
-			@sprintFoot(grid)
+			<div class="ht-history">
+				<div class="ht-history-cal">
+					@MonthCalendar(view.Person.ID, view.Grid, view.Today)
+					<p class="ht-note ht-legend">Darker means more of that day's habits were done. A dashed day had no habits.</p>
+				</div>
+				<div class="ht-history-side">
+					<div class="ht-stats">
+						<div><span class="ht-num">{ itoa(view.Ticks) }</span><span class="ht-eyebrow">ticks</span></div>
+						<div><span class="ht-num">{ itoa(view.ActiveDays) }</span><span class="ht-eyebrow">active days</span></div>
+						<div><span class="ht-num">{ itoa(view.Earned) }</span><span class="ht-eyebrow">all-time ticks</span></div>
+					</div>
+					<section class="ht-section" aria-labelledby="by-habit-title">
+						<h2 class="ht-eyebrow" id="by-habit-title">This month by habit</h2>
+						if len(view.ByHabit) == 0 {
+							<p class="ht-empty-line">Nothing ticked this month.</p>
+						} else {
+							<ul class="ht-lines">
+								for _, count := range view.ByHabit {
+									<li class="ht-line">
+										<span class="ht-line-name">{ count.Name }</span>
+										<span class="ht-minibar"><i style={ barWidth(count.Count, view.MaxByHabit()) }></i></span>
+										<span class="ht-line-count">{ itoa(count.Count) }</span>
+									</li>
+								}
+							</ul>
+						}
+					</section>
+					<section class="ht-section" aria-labelledby="goals-title">
+						<h2 class="ht-eyebrow" id="goals-title">Goals</h2>
+						<ul class="ht-lines">
+							<li class="ht-line">
+								if view.Goal != nil {
+									<span class="ht-line-name">{ view.Goal.Name }</span>
+									<span class="ht-note">{ "saving · " + itoa(view.Balance) + " / " + itoa(view.Goal.Cost) }</span>
+								} else {
+									<span class="ht-line-name">No goal yet</span>
+									<span class="ht-note">{ itoa(view.Balance) + " " + Pluralise(view.Balance, "point", "points") }</span>
+								}
+							</li>
+							for _, reward := range view.Achieved {
+								<li class="ht-line">
+									<span class="ht-line-name">{ reward.Name }</span>
+									<span class="ht-note">{ "reached " + reachedText(reward, view.Today) }</span>
+								</li>
+							}
+						</ul>
+					</section>
+					if len(view.Deductions) > 0 {
+						<section class="ht-section" aria-labelledby="deductions-title">
+							<h2 class="ht-eyebrow" id="deductions-title">Deductions this month</h2>
+							<ul class="ht-lines">
+								for _, deduction := range view.Deductions {
+									<li class="ht-line">
+										<span class="ht-line-name">
+											if deduction.Reason != nil {
+												{ *deduction.Reason }
+											} else {
+												No reason given
+											}
+										</span>
+										<span class="ht-note">{ deductionText(deduction, view.Today) }</span>
+									</li>
+								}
+							</ul>
+						</section>
+					}
+				</div>
+			</div>
 		</div>
 	}
 }

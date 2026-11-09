@@ -3,7 +3,9 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -30,6 +32,8 @@ type Server struct {
 
 // NewServer builds the HTTP handler set.
 func NewServer(svc *service.Service, logger *slog.Logger) *Server {
+	views.AssetVersion = assetVersion()
+
 	return &Server{service: svc, logger: logger}
 }
 
@@ -49,38 +53,43 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 
 	// Pages.
-	mux.HandleFunc("GET /{$}", s.tracker)
-	mux.HandleFunc("GET /history", s.historyIndex)
-	mux.HandleFunc("GET /history/{sprint}", s.historyShow)
-	mux.HandleFunc("GET /totals", s.totals)
-	mux.HandleFunc("GET /settings", s.settings)
+	mux.HandleFunc("GET /{$}", s.home)
+	mux.HandleFunc("GET /p/{person}", s.dayPage)
+	mux.HandleFunc("GET /p/{person}/{date}", s.dayPage)
+	mux.HandleFunc("GET /p/{person}/edit", s.editPage)
+	mux.HandleFunc("GET /p/{person}/history", s.historyPage)
+	mux.HandleFunc("GET /family", s.familyPage)
+
+	// Addresses from the sprint-era app, so old bookmarks still land somewhere.
+	for _, old := range []string{"GET /settings", "GET /totals", "GET /history", "GET /history/{sprint}"} {
+		target := "/"
+		if old == "GET /settings" || old == "GET /totals" {
+			target = "/family"
+		}
+
+		mux.Handle(old, http.RedirectHandler(target, http.StatusMovedPermanently))
+	}
 
 	// Ticking.
 	mux.HandleFunc("POST /ticks", s.toggleTick)
 
-	// Sprint lifecycle.
-	mux.HandleFunc("POST /sprints", s.startSprint)
-	mux.HandleFunc("POST /sprints/{sprint}/end", s.endSprint)
-	mux.HandleFunc("POST /sprints/{sprint}/participants", s.addParticipant)
-
-	// People.
-	mux.HandleFunc("POST /people", s.createPerson)
-	mux.HandleFunc("POST /people/{person}", s.updatePerson)
-	mux.HandleFunc("POST /people/{person}/delete", s.archivePerson)
-
-	// Habits.
-	mux.HandleFunc("POST /participants/{participant}/habits", s.createHabit)
-	mux.HandleFunc("POST /habits/{habit}", s.updateHabit)
-	mux.HandleFunc("POST /habits/{habit}/delete", s.archiveHabit)
-
-	// Rewards.
-	mux.HandleFunc("POST /people/{person}/rewards", s.createReward)
+	// A person's habits, goal and points.
+	mux.HandleFunc("POST /p/{person}/habits", s.addHabit)
+	mux.HandleFunc("POST /p/{person}/goal", s.setGoal)
+	mux.HandleFunc("POST /p/{person}/adjustments", s.createAdjustment)
+	mux.HandleFunc("POST /habits/{habit}", s.renameHabit)
+	mux.HandleFunc("POST /habits/{habit}/move", s.moveHabit)
+	mux.HandleFunc("POST /habits/{habit}/stop", s.stopHabit)
+	mux.HandleFunc("POST /habits/{habit}/restart", s.restartHabit)
 	mux.HandleFunc("POST /rewards/{reward}", s.updateReward)
 	mux.HandleFunc("POST /rewards/{reward}/delete", s.deleteReward)
-	mux.HandleFunc("POST /participants/{participant}/active-reward", s.setActiveReward)
 
-	// Points.
-	mux.HandleFunc("POST /participants/{participant}/adjustments", s.createAdjustment)
+	// The family list.
+	mux.HandleFunc("POST /people", s.createPerson)
+	mux.HandleFunc("POST /people/{person}", s.renamePerson)
+	mux.HandleFunc("POST /people/{person}/move", s.movePerson)
+	mux.HandleFunc("POST /people/{person}/delete", s.archivePerson)
+	mux.HandleFunc("POST /people/{person}/restore", s.restorePerson)
 
 	return s.recoverPanic(withTimeout(mux))
 }
@@ -106,14 +115,43 @@ func withTimeout(next http.Handler) http.Handler {
 	})
 }
 
-// cacheControl lets the browser hold onto assets. The binary is redeployed as a
-// unit, so a cache-busting query is unnecessary at this scale, but a modest TTL
-// keeps a reload from refetching the font-heavy stylesheet.
+// cacheControl lets the browser hold onto assets. Pages link them with ?v= set
+// to a hash of every embedded file (see assetVersion), so a deploy changes the
+// URL and a versioned request can be cached for a year without going stale.
 func cacheControl(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "public, max-age=3600")
+		if r.URL.Query().Get("v") == views.AssetVersion {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "public, max-age=3600")
+		}
+
 		next.ServeHTTP(w, r)
 	})
+}
+
+// assetVersion hashes every embedded static file, so the version changes
+// exactly when one of them does.
+func assetVersion() string {
+	hash := sha256.New()
+
+	_ = fs.WalkDir(staticFS, "static", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+
+		data, err := staticFS.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		hash.Write([]byte(path))
+		hash.Write(data)
+
+		return nil
+	})
+
+	return hex.EncodeToString(hash.Sum(nil))[:10]
 }
 
 // recoverPanic keeps one bad request from taking down the tablet's app.
@@ -151,22 +189,19 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok\n"))
 }
 
-// page assembles the shared page state: the masthead's sprint and any flash.
-func (s *Server) page(w http.ResponseWriter, r *http.Request, title string) (views.Page, error) {
-	page := views.Page{
-		Title:   title,
-		Path:    r.URL.Path,
-		Flashes: takeFlash(w, r),
+// page assembles the shared page state: the title, the nav's section and person,
+// and any flash.
+func (s *Server) page(w http.ResponseWriter, r *http.Request, title, section string, personID int64) views.Page {
+	if personID == 0 {
+		personID = s.rememberedPerson(r)
 	}
 
-	sprint, err := s.service.Store().ActiveSprint(r.Context())
-	if err != nil {
-		return views.Page{}, err
+	return views.Page{
+		Title:    title,
+		Section:  section,
+		PersonID: personID,
+		Flashes:  takeFlash(w, r),
 	}
-
-	page.Sprint = sprint
-
-	return page, nil
 }
 
 // render writes a component as a full HTML response.
@@ -226,25 +261,31 @@ func (s *Server) redirectBack(w http.ResponseWriter, r *http.Request, fallback s
 
 // samePath extracts the path and query of a same-origin referer.
 func samePath(referer string) (string, bool) {
-	if strings.HasPrefix(referer, "/") && !strings.HasPrefix(referer, "//") {
-		return referer, true
-	}
+	path := ""
 
-	for _, scheme := range []string{"http://", "https://"} {
-		if !strings.HasPrefix(referer, scheme) {
-			continue
-		}
+	switch {
+	case strings.HasPrefix(referer, "/"):
+		path = referer
+	case strings.HasPrefix(referer, "http://"), strings.HasPrefix(referer, "https://"):
+		rest := referer[strings.Index(referer, "://")+3:]
 
-		rest := referer[len(scheme):]
 		slash := strings.Index(rest, "/")
 		if slash < 0 {
 			return "/", true
 		}
 
-		return rest[slash:], true
+		path = rest[slash:]
+	default:
+		return "", false
 	}
 
-	return "", false
+	// "//host" and "/\host" are read by browsers as another site, so a path
+	// starting that way is never followed, wherever it came from.
+	if strings.HasPrefix(path, "//") || strings.HasPrefix(path, "/\\") {
+		return "", false
+	}
+
+	return path, true
 }
 
 // reportError turns an error from the service layer into user-facing feedback:

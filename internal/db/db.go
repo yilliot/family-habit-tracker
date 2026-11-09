@@ -16,8 +16,9 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-// Open opens (creating if absent) the SQLite database at path and applies the
-// schema. The returned handle has foreign keys enforced and WAL journaling on.
+// Open opens (creating if absent) the SQLite database at path and brings its
+// schema up to date (see migrate.go). The returned handle has foreign keys
+// enforced and WAL journaling on.
 func Open(ctx context.Context, path string) (*sql.DB, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)", path)
 
@@ -37,16 +38,17 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("ping sqlite %q: %w", path, err)
 	}
 
-	if _, err := sqlDB.ExecContext(ctx, schemaSQL); err != nil {
+	if err := migrate(ctx, sqlDB); err != nil {
 		sqlDB.Close()
-		return nil, fmt.Errorf("apply schema: %w", err)
+		return nil, err
 	}
 
 	return sqlDB, nil
 }
 
 // DateLayout is the canonical wire format for the date-only columns
-// (sprints.start_date, sprints.end_date, ticks.tick_date).
+// (ticks.tick_date, habits.start_date, habits.end_date, and the legacy sprint
+// dates).
 const DateLayout = "2006-01-02"
 
 // DateTimeLayout is the canonical wire format for datetime columns. It matches

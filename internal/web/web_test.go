@@ -17,9 +17,11 @@ import (
 	"github.com/el/family-habit-tracker/internal/service"
 	"github.com/el/family-habit-tracker/internal/store"
 	"github.com/el/family-habit-tracker/internal/web"
+	"github.com/el/family-habit-tracker/internal/web/views"
 )
 
-var fixedToday = time.Date(2026, 5, 1, 9, 30, 0, 0, time.UTC)
+// fixedNow is Monday 9 November 2026, mid-morning.
+var fixedNow = time.Date(2026, 11, 9, 9, 30, 0, 0, time.UTC)
 
 // newTestServer builds the full HTTP stack over a fresh database.
 func newTestServer(t *testing.T) (*httptest.Server, *service.Service) {
@@ -32,7 +34,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *service.Service) {
 
 	t.Cleanup(func() { sqlDB.Close() })
 
-	dataStore := store.New(sqlDB).WithClock(func() time.Time { return fixedToday })
+	dataStore := store.New(sqlDB).WithClock(func() time.Time { return fixedNow })
 	svc := service.New(dataStore)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -41,6 +43,45 @@ func newTestServer(t *testing.T) (*httptest.Server, *service.Service) {
 	t.Cleanup(server.Close)
 
 	return server, svc
+}
+
+// family seeds 可遇 with two habits, one of them ticked today, and a goal one
+// point away.
+func family(t *testing.T, svc *service.Service) (domain.Person, domain.Habit, domain.Habit) {
+	t.Helper()
+
+	ctx := t.Context()
+
+	person, err := svc.CreatePerson(ctx, "可遇", nil)
+	if err != nil {
+		t.Fatalf("person: %v", err)
+	}
+
+	piano, err := svc.AddHabit(ctx, person.ID, "piano 20分钟")
+	if err != nil {
+		t.Fatalf("habit: %v", err)
+	}
+
+	story, err := svc.AddHabit(ctx, person.ID, "story 30分钟")
+	if err != nil {
+		t.Fatalf("habit: %v", err)
+	}
+
+	if _, err := svc.ToggleTick(ctx, piano.ID, fixedNow); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+
+	if _, _, err := svc.SetGoal(ctx, person.ID, "Lego The pickaxes mine", 2); err != nil {
+		t.Fatalf("goal: %v", err)
+	}
+
+	return person, piano, story
+}
+
+// noRedirects is a client that stops at the first response, so redirects and
+// the cookies set on them can be asserted.
+func noRedirects() *http.Client {
+	return &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
 // get fetches a page and returns its status and body.
@@ -61,245 +102,228 @@ func get(t *testing.T, server *httptest.Server, path string) (int, string) {
 	return resp.StatusCode, string(body)
 }
 
-// post submits a form without following redirects, so the redirect itself can
-// be asserted.
-func post(t *testing.T, server *httptest.Server, path string, form url.Values, headers map[string]string) *http.Response {
+// do sends a request without following redirects.
+func do(t *testing.T, server *httptest.Server, method, path string, form url.Values, headers map[string]string) (*http.Response, string) {
 	t.Helper()
 
-	req, err := http.NewRequest(http.MethodPost, server.URL+path, strings.NewReader(form.Encode()))
+	var reader io.Reader
+	if form != nil {
+		reader = strings.NewReader(form.Encode())
+	}
+
+	req, err := http.NewRequest(method, server.URL+path, reader)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
 
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if form != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
 
-	client := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-
-	resp, err := client.Do(req)
+	resp, err := noRedirects().Do(req)
 	if err != nil {
-		t.Fatalf("POST %s: %v", path, err)
+		t.Fatalf("%s %s: %v", method, path, err)
 	}
+	defer resp.Body.Close()
 
-	return resp
+	body, _ := io.ReadAll(resp.Body)
+
+	return resp, string(body)
 }
 
+func id(value int64) string { return strconv.FormatInt(value, 10) }
+
 func TestEveryPageRenders(t *testing.T) {
-	server, _ := newTestServer(t)
+	server, svc := newTestServer(t)
+	person, _, _ := family(t, svc)
+	p := "/p/" + id(person.ID)
 
-	paths := []string{"/", "/history", "/totals", "/settings", "/settings?tab=people", "/settings?tab=rewards", "/healthz"}
-
-	for _, path := range paths {
+	for _, path := range []string{"/?pick=1", p, p + "/2026-11-05", p + "/2026-08-12", p + "/edit", p + "/history", p + "/history?m=2026-10", "/family"} {
 		status, body := get(t, server, path)
 
 		if status != http.StatusOK {
 			t.Errorf("GET %s = %d, want 200", path, status)
 		}
 
-		if path != "/healthz" && !strings.Contains(body, "家庭习惯表") {
+		if !strings.Contains(body, "家庭习惯表") {
 			t.Errorf("GET %s did not render the masthead", path)
 		}
 	}
 }
 
-func TestStaticAssetsAreServed(t *testing.T) {
-	server, _ := newTestServer(t)
+func TestAPersonsDayShowsTheirHabitsPointsAndGoal(t *testing.T) {
+	server, svc := newTestServer(t)
+	person, _, _ := family(t, svc)
 
-	for _, asset := range []string{"/static/app.css", "/static/app.js", "/static/htmx.min.js", "/static/favicon.svg"} {
-		status, body := get(t, server, asset)
+	_, body := get(t, server, "/p/"+id(person.ID))
 
-		if status != http.StatusOK {
-			t.Errorf("GET %s = %d, want 200", asset, status)
-		}
-
-		if len(body) == 0 {
-			t.Errorf("GET %s returned an empty body", asset)
+	for _, want := range []string{"Monday 9 Nov", "piano 20分钟", "story 30分钟", "Lego The pickaxes mine", `class="ht-num">1<`, "1 of 2 today", `aria-pressed="true"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("day page is missing %q", want)
 		}
 	}
 }
 
-func TestEmptyStateInvitesTheFirstSprint(t *testing.T) {
+func TestAnEmptyAppSendsTheFamilyToAddPeople(t *testing.T) {
 	server, _ := newTestServer(t)
 
 	_, body := get(t, server, "/")
 
-	if !strings.Contains(body, "Start your first sprint") {
-		t.Error("an empty tracker should invite the family to start a sprint")
+	if !strings.Contains(body, `href="/family"`) || !strings.Contains(body, "Add family") {
+		t.Error("with nobody in the family, home should point at the Family page")
 	}
 }
 
-// A full pass through the app as someone would actually use it: add the family,
-// start a sprint, tick a box, and see the point land.
-func TestFamilyCanRunASprintEndToEnd(t *testing.T) {
+func TestADeviceRemembersItsPerson(t *testing.T) {
 	server, svc := newTestServer(t)
+	person, _, _ := family(t, svc)
 
-	resp := post(t, server, "/people", url.Values{"name": {"可遇"}}, nil)
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusSeeOther {
-		t.Fatalf("adding a person returned %d, want a redirect", resp.StatusCode)
+	resp, body := do(t, server, http.MethodGet, "/", nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Who's ticking?") {
+		t.Fatalf("a new device should be asked who is ticking (status %d)", resp.StatusCode)
 	}
 
-	people, err := svc.Store().People(t.Context())
-	if err != nil || len(people) != 1 {
-		t.Fatalf("expected one person, got %d (%v)", len(people), err)
+	resp, _ = do(t, server, http.MethodGet, "/p/"+id(person.ID), nil, nil)
+
+	var remembered *http.Cookie
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == "ht_person" {
+			remembered = cookie
+		}
 	}
 
-	personID := people[0].ID
-
-	form := url.Values{
-		"start_date":                      {"2026-04-19"},
-		"end_date":                        {"2026-05-16"},
-		"person_ids":                      {itoa64(personID)},
-		"habits_" + itoa64(personID):      {"30分钟阅读时间\n整理书桌\n\n"},
-		"reward_mode_" + itoa64(personID): {"new"},
-		"reward_name_" + itoa64(personID): {"Lego Minecraft"},
-		"reward_cost_" + itoa64(personID): {"3"},
+	if remembered == nil || remembered.Value != id(person.ID) {
+		t.Fatalf("opening a person's page should remember them, got %+v", remembered)
 	}
 
-	resp = post(t, server, "/sprints", form, nil)
-	resp.Body.Close()
+	cookie := map[string]string{"Cookie": "ht_person=" + id(person.ID)}
 
-	if resp.StatusCode != http.StatusSeeOther {
-		t.Fatalf("starting a sprint returned %d, want a redirect", resp.StatusCode)
+	resp, _ = do(t, server, http.MethodGet, "/", nil, cookie)
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/p/"+id(person.ID) {
+		t.Errorf("home should open the remembered person's today, got %d → %q", resp.StatusCode, resp.Header.Get("Location"))
 	}
 
-	sprint, err := svc.Store().ActiveSprint(t.Context())
-	if err != nil || sprint == nil {
-		t.Fatalf("expected an active sprint: %v", err)
+	resp, _ = do(t, server, http.MethodGet, "/?next=history", nil, cookie)
+	if resp.Header.Get("Location") != "/p/"+id(person.ID)+"/history" {
+		t.Errorf("History from the nav should open their history, got %q", resp.Header.Get("Location"))
 	}
 
-	grid, err := svc.BuildGrid(t.Context(), *sprint)
-	if err != nil {
-		t.Fatalf("build grid: %v", err)
+	if err := svc.ArchivePerson(t.Context(), person.ID); err != nil {
+		t.Fatalf("archive: %v", err)
 	}
 
-	if len(grid.Participants) != 1 {
-		t.Fatalf("grid has %d participants, want 1", len(grid.Participants))
+	if resp, _ = do(t, server, http.MethodGet, "/", nil, cookie); resp.StatusCode != http.StatusOK {
+		t.Errorf("a remembered person who was archived should fall back to the picker, got %d", resp.StatusCode)
+	}
+}
+
+func TestEachDayHasOneAddress(t *testing.T) {
+	server, svc := newTestServer(t)
+	person, _, _ := family(t, svc)
+	p := "/p/" + id(person.ID)
+
+	for _, path := range []string{p + "/2026-11-09", p + "/2026-12-25"} {
+		resp, _ := do(t, server, http.MethodGet, path, nil, nil)
+		if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != p {
+			t.Errorf("GET %s = %d → %q, want a redirect to today", path, resp.StatusCode, resp.Header.Get("Location"))
+		}
 	}
 
-	// The blank line in the habits box must not have become an empty habit.
-	if got := len(grid.Participants[0].Habits); got != 2 {
-		t.Fatalf("participant has %d habits, want 2", got)
+	for _, path := range []string{"/p/999", "/p/abc", p + "/not-a-date", p + "/history?m=nope"} {
+		if status, _ := get(t, server, path); status != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", path, status)
+		}
 	}
+}
 
-	habitID := grid.Participants[0].Habits[0].Habit.ID
+func TestSprintEraAddressesStillLandSomewhere(t *testing.T) {
+	server, _ := newTestServer(t)
 
-	resp = post(t, server, "/ticks", url.Values{
-		"habit_id":  {itoa64(habitID)},
-		"tick_date": {"2026-04-20"},
+	for path, target := range map[string]string{"/settings": "/family", "/totals": "/family", "/history": "/", "/history/4": "/"} {
+		resp, _ := do(t, server, http.MethodGet, path, nil, nil)
+		if resp.StatusCode != http.StatusMovedPermanently || resp.Header.Get("Location") != target {
+			t.Errorf("GET %s = %d → %q, want %s", path, resp.StatusCode, resp.Header.Get("Location"), target)
+		}
+	}
+}
+
+func TestTickingWithoutJavaScriptRedirectsBackToTheDay(t *testing.T) {
+	server, svc := newTestServer(t)
+	person, _, story := family(t, svc)
+
+	resp, _ := do(t, server, http.MethodPost, "/ticks", url.Values{
+		"habit_id":  {id(story.ID)},
+		"tick_date": {"2026-11-09"},
 	}, nil)
-	resp.Body.Close()
 
-	if resp.StatusCode != http.StatusSeeOther {
-		t.Fatalf("ticking returned %d, want a redirect", resp.StatusCode)
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/p/"+id(person.ID) {
+		t.Errorf("plain tick = %d → %q, want a redirect to the day", resp.StatusCode, resp.Header.Get("Location"))
 	}
 
-	participant := grid.Participants[0].Participant
-
-	balance, err := svc.Points().SprintBalance(t.Context(), *sprint, participant)
-	if err != nil {
-		t.Fatalf("balance: %v", err)
-	}
-
-	if balance != 1 {
-		t.Errorf("balance after one tick = %d, want 1", balance)
-	}
-
-	// The tracker should now show the grid rather than the empty state.
-	_, body := get(t, server, "/")
-
-	if strings.Contains(body, "Start your first sprint") {
-		t.Error("the tracker still shows the empty state after a sprint started")
-	}
-
-	if !strings.Contains(body, "Lego Minecraft") {
-		t.Error("the reward should be printed on the grid")
+	if balance, _ := svc.Points().Balance(t.Context(), person.ID); balance != 0 {
+		t.Errorf("balance = %d: two ticks should have bought the 2-point goal", balance)
 	}
 }
 
-// htmx gets a fragment, not a redirect, so the cell can swap in place.
-func TestHTMXTickReturnsAFragmentWithOutOfBandUpdates(t *testing.T) {
+// From htmx a tick answers with the tapped row plus everything else it changed,
+// out of band. Reaching the goal brings the celebration.
+func TestHTMXTickReturnsTheRowTheTotalsAndTheCelebration(t *testing.T) {
 	server, svc := newTestServer(t)
+	_, _, story := family(t, svc)
 
-	habitID, _ := seedSprint(t, svc)
-
-	resp := post(t, server, "/ticks", url.Values{
-		"habit_id":  {itoa64(habitID)},
-		"tick_date": {"2026-04-20"},
+	resp, body := do(t, server, http.MethodPost, "/ticks", url.Values{
+		"habit_id":  {id(story.ID)},
+		"tick_date": {"2026-11-09"},
 	}, map[string]string{"HX-Request": "true"})
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("htmx tick returned %d, want 200", resp.StatusCode)
 	}
 
-	body, _ := io.ReadAll(resp.Body)
-	rendered := string(body)
-
-	if !strings.Contains(rendered, `data-ticked="true"`) {
-		t.Error("the returned cell should be ticked")
+	// Only the tapped row is swapped, so a tap on another row that is still
+	// queued keeps its form; everything else the tap changed comes out of band.
+	if !strings.HasPrefix(strings.TrimSpace(body), `<li class="ht-habit" id="row-`+id(story.ID)+`"`) {
+		t.Error("the response should open with the tapped row, which the form targets")
 	}
 
-	// The fragment is a whole <td>, so the form must swap its enclosing cell;
-	// swapping the form itself nests a cell inside a cell and knocks the tick
-	// off the grid.
-	if !strings.HasPrefix(strings.TrimSpace(rendered), "<td") {
-		t.Error("the returned fragment should be a whole day cell")
+	if !strings.Contains(body, `hx-target="closest li"`) || strings.Count(body, `<li class="ht-habit"`) != 1 {
+		t.Error("the response should carry exactly the one row, targeting itself")
 	}
 
-	if !strings.Contains(rendered, `hx-target="closest td"`) {
-		t.Error("the cell form should swap its enclosing td")
-	}
-
-	for _, fragment := range []string{`id="bal-`, `id="rw-`, `id="ps-`, `hx-swap-oob="true"`} {
-		if !strings.Contains(rendered, fragment) {
-			t.Errorf("response is missing the out-of-band fragment %q", fragment)
+	for _, want := range []string{
+		`id="day-foot" hx-swap-oob="true"`, `id="week" aria-label="This week" hx-swap-oob="true"`,
+		`id="points" aria-label="Points" hx-swap-oob="true"`, `id="day-month" aria-label="This month" hx-swap-oob="true"`,
+		`id="strip" aria-label="Family" hx-swap-oob="true"`, "2 of 2 today", "Goal hit", `id="celebration" hx-swap-oob="true"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("htmx tick response is missing %q", want)
 		}
 	}
-}
 
-// Reaching a goal must deliver the celebration in the same response.
-func TestHTMXTickDeliversTheCelebration(t *testing.T) {
-	server, svc := newTestServer(t)
-
-	habitID, _ := seedSprint(t, svc)
-
-	resp := post(t, server, "/ticks", url.Values{
-		"habit_id":  {itoa64(habitID)},
-		"tick_date": {"2026-04-20"},
+	_, body = do(t, server, http.MethodPost, "/ticks", url.Values{
+		"habit_id":  {id(story.ID)},
+		"tick_date": {"2026-11-09"},
 	}, map[string]string{"HX-Request": "true"})
-	resp.Body.Close()
 
-	resp = post(t, server, "/ticks", url.Values{
-		"habit_id":  {itoa64(habitID)},
-		"tick_date": {"2026-04-21"},
-	}, map[string]string{"HX-Request": "true"})
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	if !strings.Contains(string(body), "Goal hit") {
-		t.Error("the tick that earns the goal should carry the celebration")
+	if strings.Contains(body, "Goal hit") || !strings.Contains(body, `<div id="celebration" hx-swap-oob="true"></div>`) {
+		t.Error("a tick that earns nothing should clear the celebration slot")
 	}
 }
 
 // A rejected tick must not swap anything in; the page keeps the optimistic
 // rollback and shows the reason.
-func TestHTMXTickOnAFutureDayIsRejected(t *testing.T) {
+func TestHTMXTickOutsideTheWindowIsRejected(t *testing.T) {
 	server, svc := newTestServer(t)
+	_, piano, _ := family(t, svc)
 
-	habitID, _ := seedSprint(t, svc)
-
-	resp := post(t, server, "/ticks", url.Values{
-		"habit_id":  {itoa64(habitID)},
-		"tick_date": {"2026-05-10"},
+	resp, _ := do(t, server, http.MethodPost, "/ticks", url.Values{
+		"habit_id":  {id(piano.ID)},
+		"tick_date": {"2026-11-10"},
 	}, map[string]string{"HX-Request": "true"})
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Errorf("future tick returned %d, want 422", resp.StatusCode)
@@ -310,11 +334,108 @@ func TestHTMXTickOnAFutureDayIsRejected(t *testing.T) {
 	}
 }
 
+func TestOldDaysRenderReadOnly(t *testing.T) {
+	server, svc := newTestServer(t)
+	person, _, _ := family(t, svc)
+
+	_, body := get(t, server, "/p/"+id(person.ID)+"/2026-10-01")
+
+	if !strings.Contains(body, "kept as it was") {
+		t.Error("a day more than a week back should say it is history")
+	}
+
+	_, body = get(t, server, "/p/"+id(person.ID)+"/2026-11-08")
+	if !strings.Contains(body, "Forgot a tick?") {
+		t.Error("yesterday should invite a catch-up tick")
+	}
+}
+
+func TestAHabitCanBeAddedRenamedMovedStoppedAndRestarted(t *testing.T) {
+	server, svc := newTestServer(t)
+	person, piano, _ := family(t, svc)
+	p := "/p/" + id(person.ID)
+
+	resp, _ := do(t, server, http.MethodPost, p+"/habits", url.Values{"name": {"Good Night"}}, map[string]string{"Referer": server.URL + p})
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != p {
+		t.Fatalf("add habit = %d → %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+
+	do(t, server, http.MethodPost, "/habits/"+id(piano.ID), url.Values{"name": {"piano 30分钟"}}, nil)
+	do(t, server, http.MethodPost, "/habits/"+id(piano.ID)+"/move", url.Values{"dir": {"down"}}, nil)
+
+	_, body := get(t, server, p)
+	if strings.Index(body, "story 30分钟") > strings.Index(body, "piano 30分钟") {
+		t.Error("piano should have been renamed and moved below story")
+	}
+
+	if !strings.Contains(body, "Good Night") {
+		t.Error("the added habit should show today")
+	}
+
+	resp, _ = do(t, server, http.MethodPost, "/habits/"+id(piano.ID)+"/stop", url.Values{}, nil)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("stop = %d", resp.StatusCode)
+	}
+
+	_, body = get(t, server, p+"/edit")
+	if !strings.Contains(body, "Stopped earlier") {
+		t.Error("the edit page should list the stopped habit")
+	}
+
+	do(t, server, http.MethodPost, "/habits/"+id(piano.ID)+"/restart", url.Values{}, nil)
+
+	if _, body = get(t, server, p+"/edit"); strings.Contains(body, "Stopped earlier") {
+		t.Error("a restarted habit should leave the stopped list")
+	}
+}
+
+func TestDeductingFromAPersonsPage(t *testing.T) {
+	server, svc := newTestServer(t)
+	person, _, _ := family(t, svc)
+	p := "/p/" + id(person.ID)
+
+	resp, _ := do(t, server, http.MethodPost, p+"/adjustments", url.Values{"points": {"3"}, "reason": {"zoo"}}, nil)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("deduct = %d", resp.StatusCode)
+	}
+
+	if balance, _ := svc.Points().Balance(t.Context(), person.ID); balance != -2 {
+		t.Errorf("balance = %d, want 1 − 3 = −2", balance)
+	}
+
+	if resp, _ = do(t, server, http.MethodPost, p+"/adjustments", url.Values{"points": {"0"}}, nil); resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("a zero deduction should bounce back with a message, got %d", resp.StatusCode)
+	}
+}
+
+func TestTheFamilyListCanChange(t *testing.T) {
+	server, svc := newTestServer(t)
+	person, _, _ := family(t, svc)
+
+	do(t, server, http.MethodPost, "/people", url.Values{"name": {"奇乐"}}, nil)
+	do(t, server, http.MethodPost, "/people/"+id(person.ID), url.Values{"name": {"可遇 Keyu"}}, nil)
+	do(t, server, http.MethodPost, "/people/"+id(person.ID)+"/delete", url.Values{}, nil)
+
+	_, body := get(t, server, "/family")
+	if !strings.Contains(body, "奇乐") || !strings.Contains(body, "Bring back") {
+		t.Error("the family page should show the new member and the archived one")
+	}
+
+	if status, _ := get(t, server, "/p/"+id(person.ID)); status != http.StatusNotFound {
+		t.Errorf("an archived person's page = %d, want 404", status)
+	}
+
+	do(t, server, http.MethodPost, "/people/"+id(person.ID)+"/restore", url.Values{}, nil)
+
+	if _, body = get(t, server, "/p/"+id(person.ID)); !strings.Contains(body, "可遇 Keyu") {
+		t.Error("a restored person should be back, renamed")
+	}
+}
+
 func TestValidationFailureFlashesAndRedirects(t *testing.T) {
 	server, _ := newTestServer(t)
 
-	resp := post(t, server, "/people", url.Values{"name": {"   "}}, nil)
-	defer resp.Body.Close()
+	resp, _ := do(t, server, http.MethodPost, "/people", url.Values{"name": {"   "}}, nil)
 
 	if resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("rejected form returned %d, want a redirect", resp.StatusCode)
@@ -337,133 +458,35 @@ func TestValidationFailureFlashesAndRedirects(t *testing.T) {
 func TestRedirectIgnoresAnOffsiteReferer(t *testing.T) {
 	server, _ := newTestServer(t)
 
-	resp := post(t, server, "/people", url.Values{"name": {"妈妈"}},
-		map[string]string{"Referer": "https://evil.example.com/steal"})
-	defer resp.Body.Close()
+	resp, _ := do(t, server, http.MethodPost, "/people", url.Values{"name": {"妈妈"}}, map[string]string{"Referer": "https://evil.example//elsewhere"})
 
-	location := resp.Header.Get("Location")
-
-	if strings.Contains(location, "evil.example.com") {
-		t.Errorf("Location = %q, want a same-origin path", location)
-	}
-
-	if !strings.HasPrefix(location, "/") {
-		t.Errorf("Location = %q, want a relative path", location)
+	if location := resp.Header.Get("Location"); strings.Contains(location, "evil.example") || strings.HasPrefix(location, "//") {
+		t.Errorf("redirect followed an off-site referer: %q", location)
 	}
 }
 
-func TestArchivedSprintIsReadOnly(t *testing.T) {
-	server, svc := newTestServer(t)
-
-	habitID, sprint := seedSprint(t, svc)
-
-	if _, err := svc.EndSprint(t.Context(), sprint.ID); err != nil {
-		t.Fatalf("end sprint: %v", err)
-	}
-
-	status, body := get(t, server, "/history/"+itoa64(sprint.ID))
-	if status != http.StatusOK {
-		t.Fatalf("history page = %d, want 200", status)
-	}
-
-	if !strings.Contains(body, `data-readonly="true"`) {
-		t.Error("an archived grid should render its cells as read-only")
-	}
-
-	resp := post(t, server, "/ticks", url.Values{
-		"habit_id":  {itoa64(habitID)},
-		"tick_date": {"2026-04-20"},
-	}, map[string]string{"HX-Request": "true"})
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusUnprocessableEntity {
-		t.Errorf("ticking an archived sprint returned %d, want 422", resp.StatusCode)
-	}
-}
-
-// An active sprint has no history page; it belongs on the tracker where it can
-// still be ticked.
-func TestActiveSprintRedirectsAwayFromHistory(t *testing.T) {
-	server, svc := newTestServer(t)
-
-	_, sprint := seedSprint(t, svc)
-
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-
-	resp, err := client.Get(server.URL + "/history/" + itoa64(sprint.ID))
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusSeeOther {
-		t.Errorf("status = %d, want a redirect to the tracker", resp.StatusCode)
-	}
-}
-
-func TestMissingSprintIsNotFound(t *testing.T) {
+func TestVersionedAssetsAreCachedForAYear(t *testing.T) {
 	server, _ := newTestServer(t)
 
-	status, _ := get(t, server, "/history/9999")
+	for _, asset := range []string{"app.css", "app.js", "htmx.min.js", "favicon.svg"} {
+		resp, body := do(t, server, http.MethodGet, "/static/"+asset+"?v="+views.AssetVersion, nil, nil)
 
-	if status != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", status)
-	}
-}
+		if resp.StatusCode != http.StatusOK || len(body) == 0 {
+			t.Errorf("GET %s = %d with %d bytes", asset, resp.StatusCode, len(body))
+		}
 
-// The settings tab lives in the URL, so a tab can be linked to and bookmarked.
-func TestSettingsTabComesFromTheURL(t *testing.T) {
-	server, _ := newTestServer(t)
-
-	_, body := get(t, server, "/settings?tab=people")
-	if !strings.Contains(body, "Add person") {
-		t.Error("the people tab should render its own form")
+		if cache := resp.Header.Get("Cache-Control"); !strings.Contains(cache, "immutable") {
+			t.Errorf("versioned %s Cache-Control = %q, want a year, immutable", asset, cache)
+		}
 	}
 
-	_, body = get(t, server, "/settings?tab=rewards")
-	if !strings.Contains(body, "Rewards") {
-		t.Error("the rewards tab should render")
+	if resp, _ := do(t, server, http.MethodGet, "/static/app.css", nil, nil); strings.Contains(resp.Header.Get("Cache-Control"), "immutable") {
+		t.Error("an unversioned asset must not be cached forever")
 	}
 
-	_, body = get(t, server, "/settings?tab=nonsense")
-	if !strings.Contains(body, "sprint") {
-		t.Error("an unknown tab should fall back to the sprint panel")
+	if _, body := get(t, server, "/family"); !strings.Contains(body, "/static/app.css?v="+views.AssetVersion) {
+		t.Error("pages should link the versioned stylesheet")
 	}
-}
-
-// seedSprint sets up one person in a running sprint with a two-point goal,
-// returning the habit to tick and the sprint.
-func seedSprint(t *testing.T, svc *service.Service) (int64, domain.Sprint) {
-	t.Helper()
-
-	person, err := svc.CreatePerson(t.Context(), "可遇", nil)
-	if err != nil {
-		t.Fatalf("create person: %v", err)
-	}
-
-	sprint, err := svc.StartSprint(t.Context(),
-		time.Date(2026, 4, 19, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 5, 16, 0, 0, 0, 0, time.UTC),
-		[]service.ParticipantInput{{
-			PersonID: person.ID,
-			Habits:   []service.HabitInput{{Name: "阅读", DisplayOrder: 1}},
-			Reward:   service.RewardChoice{Mode: service.RewardNew, Name: "Lego Minecraft", Cost: 2},
-		}},
-	)
-	if err != nil {
-		t.Fatalf("start sprint: %v", err)
-	}
-
-	grid, err := svc.BuildGrid(t.Context(), sprint)
-	if err != nil {
-		t.Fatalf("build grid: %v", err)
-	}
-
-	return grid.Participants[0].Habits[0].Habit.ID, sprint
-}
-
-func itoa64(value int64) string {
-	return strconv.FormatInt(value, 10)
 }
 
 // An uptime check must catch a dead database, not only a dead process.

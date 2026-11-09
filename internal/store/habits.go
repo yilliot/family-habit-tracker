@@ -11,22 +11,35 @@ import (
 	"github.com/el/family-habit-tracker/internal/domain"
 )
 
-const habitColumns = `id, sprint_participant_id, name, display_order, created_at, updated_at, deleted_at`
+const habitColumns = `id, person_id, sprint_participant_id, name, display_order, start_date, end_date, created_at, updated_at, deleted_at`
 
 func scanHabit(sc interface{ Scan(...any) error }) (domain.Habit, error) {
 	var (
 		h                               domain.Habit
-		participantID                   sql.NullInt64
+		personID, participantID         sql.NullInt64
+		startDate, endDate              sql.NullString
 		createdAt, updatedAt, deletedAt sql.NullString
 	)
 
-	err := sc.Scan(&h.ID, &participantID, &h.Name, &h.DisplayOrder, &createdAt, &updatedAt, &deletedAt)
+	err := sc.Scan(&h.ID, &personID, &participantID, &h.Name, &h.DisplayOrder, &startDate, &endDate, &createdAt, &updatedAt, &deletedAt)
 	if err != nil {
 		return domain.Habit{}, err
 	}
 
+	h.PersonID = personID.Int64
 	h.SprintParticipantID = toInt64Ptr(participantID)
 
+	if h.StartDate, err = db.ScanDate(startDate); err != nil {
+		return domain.Habit{}, fmt.Errorf("habit %d start_date: %w", h.ID, err)
+	}
+	if endDate.Valid && endDate.String != "" {
+		end, err := db.ScanDate(endDate)
+		if err != nil {
+			return domain.Habit{}, fmt.Errorf("habit %d end_date: %w", h.ID, err)
+		}
+
+		h.EndDate = &end
+	}
 	if h.CreatedAt, err = db.ScanTime(createdAt); err != nil {
 		return domain.Habit{}, fmt.Errorf("habit %d created_at: %w", h.ID, err)
 	}
@@ -40,11 +53,10 @@ func scanHabit(sc interface{ Scan(...any) error }) (domain.Habit, error) {
 	return h, nil
 }
 
-// Habit fetches one live habit. Soft-deleted habits are treated as absent so a
-// removed habit cannot be ticked through a stale page.
+// Habit fetches one habit, running or stopped.
 func (s *Store) Habit(ctx context.Context, id int64) (domain.Habit, error) {
 	h, err := scanHabit(s.q.QueryRowContext(ctx,
-		`SELECT `+habitColumns+` FROM habits WHERE id = ? AND deleted_at IS NULL`, id,
+		`SELECT `+habitColumns+` FROM habits WHERE id = ? AND person_id IS NOT NULL`, id,
 	))
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Habit{}, ErrNotFound
@@ -56,20 +68,22 @@ func (s *Store) Habit(ctx context.Context, id int64) (domain.Habit, error) {
 	return h, nil
 }
 
-// HabitsByParticipant lists a participant's live habits in display order.
-func (s *Store) HabitsByParticipant(ctx context.Context, participantID int64) ([]domain.Habit, error) {
+// HabitsForPerson lists every habit a person has ever had, running and
+// stopped, in display order. A family adds a few a year, so callers filter by
+// date in Go rather than in SQL.
+func (s *Store) HabitsForPerson(ctx context.Context, personID int64) ([]domain.Habit, error) {
 	rows, err := s.q.QueryContext(ctx,
 		`SELECT `+habitColumns+` FROM habits
-		   WHERE sprint_participant_id = ? AND deleted_at IS NULL
-		   ORDER BY display_order ASC, id ASC`,
-		participantID,
+		  WHERE person_id = ?
+		  ORDER BY display_order ASC, id ASC`,
+		personID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("list habits for participant %d: %w", participantID, err)
+		return nil, fmt.Errorf("list habits for person %d: %w", personID, err)
 	}
 	defer rows.Close()
 
-	habits := make([]domain.Habit, 0, 6)
+	habits := make([]domain.Habit, 0, 16)
 	for rows.Next() {
 		h, err := scanHabit(rows)
 		if err != nil {
@@ -82,13 +96,13 @@ func (s *Store) HabitsByParticipant(ctx context.Context, participantID int64) ([
 	return habits, rows.Err()
 }
 
-// CreateHabit adds a habit to a participant.
-func (s *Store) CreateHabit(ctx context.Context, participantID int64, name string, displayOrder int) (domain.Habit, error) {
+// CreateHabit starts a habit for a person on a day.
+func (s *Store) CreateHabit(ctx context.Context, personID int64, name string, displayOrder int, start time.Time) (domain.Habit, error) {
 	now := db.FormatTime(s.Now())
 
 	res, err := s.q.ExecContext(ctx,
-		`INSERT INTO habits (sprint_participant_id, name, display_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
-		participantID, name, displayOrder, now, now,
+		`INSERT INTO habits (person_id, name, display_order, start_date, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		personID, name, displayOrder, db.FormatDate(start), now, now,
 	)
 	if err != nil {
 		return domain.Habit{}, fmt.Errorf("insert habit: %w", err)
@@ -102,60 +116,61 @@ func (s *Store) CreateHabit(ctx context.Context, participantID int64, name strin
 	return s.Habit(ctx, id)
 }
 
-// UpdateHabit renames a habit and sets its position.
-func (s *Store) UpdateHabit(ctx context.Context, id int64, name string, displayOrder int) error {
+// RenameHabit changes a habit's name.
+func (s *Store) RenameHabit(ctx context.Context, id int64, name string) error {
 	_, err := s.q.ExecContext(ctx,
-		`UPDATE habits SET name = ?, display_order = ?, updated_at = ? WHERE id = ?`,
-		name, displayOrder, db.FormatTime(s.Now()), id,
+		`UPDATE habits SET name = ?, updated_at = ? WHERE id = ?`,
+		name, db.FormatTime(s.Now()), id,
 	)
 	if err != nil {
-		return fmt.Errorf("update habit %d: %w", id, err)
+		return fmt.Errorf("rename habit %d: %w", id, err)
 	}
 
 	return nil
 }
 
-// SoftDeleteHabit removes a habit from the grid while keeping its ticks, which
-// continue to count toward lifetime totals.
-func (s *Store) SoftDeleteHabit(ctx context.Context, id int64) error {
-	now := db.FormatTime(s.Now())
-
+// SetHabitOrder sets a habit's position in its person's list.
+func (s *Store) SetHabitOrder(ctx context.Context, id int64, displayOrder int) error {
 	_, err := s.q.ExecContext(ctx,
-		`UPDATE habits SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
-		now, now, id,
+		`UPDATE habits SET display_order = ?, updated_at = ? WHERE id = ?`,
+		displayOrder, db.FormatTime(s.Now()), id,
 	)
 	if err != nil {
-		return fmt.Errorf("soft delete habit %d: %w", id, err)
+		return fmt.Errorf("order habit %d: %w", id, err)
 	}
 
 	return nil
 }
 
-// SoftDeleteHabitsForParticipant archives every habit belonging to a
-// participant, used when a person leaves a sprint mid-flight.
-func (s *Store) SoftDeleteHabitsForParticipant(ctx context.Context, participantID int64) error {
-	now := db.FormatTime(s.Now())
-
+// StopHabit ends a habit; end is the last day it counts as running.
+func (s *Store) StopHabit(ctx context.Context, id int64, end time.Time) error {
 	_, err := s.q.ExecContext(ctx,
-		`UPDATE habits SET deleted_at = ?, updated_at = ?
-		   WHERE sprint_participant_id = ? AND deleted_at IS NULL`,
-		now, now, participantID,
+		`UPDATE habits SET end_date = ?, updated_at = ? WHERE id = ? AND end_date IS NULL`,
+		db.FormatDate(end), db.FormatTime(s.Now()), id,
 	)
 	if err != nil {
-		return fmt.Errorf("soft delete habits for participant %d: %w", participantID, err)
+		return fmt.Errorf("stop habit %d: %w", id, err)
 	}
 
 	return nil
 }
 
-// MaxHabitDisplayOrder returns the highest order value among a participant's
-// habits.
-func (s *Store) MaxHabitDisplayOrder(ctx context.Context, participantID int64) (int, error) {
+// DeleteHabit removes a habit outright. Only used for one added by mistake that
+// has no ticks, so there is nothing to keep.
+func (s *Store) DeleteHabit(ctx context.Context, id int64) error {
+	if _, err := s.q.ExecContext(ctx, `DELETE FROM habits WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("delete habit %d: %w", id, err)
+	}
+
+	return nil
+}
+
+// MaxHabitDisplayOrder returns the highest order value among a person's habits.
+func (s *Store) MaxHabitDisplayOrder(ctx context.Context, personID int64) (int, error) {
 	var max sql.NullInt64
 
 	err := s.q.QueryRowContext(ctx,
-		`SELECT MAX(display_order) FROM habits WHERE sprint_participant_id = ? AND deleted_at IS NULL`,
-		participantID,
+		`SELECT MAX(display_order) FROM habits WHERE person_id = ?`, personID,
 	).Scan(&max)
 	if err != nil {
 		return 0, fmt.Errorf("max habit display_order: %w", err)
@@ -164,46 +179,110 @@ func (s *Store) MaxHabitDisplayOrder(ctx context.Context, participantID int64) (
 	return int(max.Int64), nil
 }
 
-// TickDatesByParticipant returns, for each of a participant's live habits, the
-// set of dates that habit is ticked on. One query serves a whole grid row,
-// keeping the page render free of per-habit round trips.
-func (s *Store) TickDatesByParticipant(ctx context.Context, participantID int64) (map[int64]map[string]bool, error) {
+// DayTick is one tick, reduced to the habit and the day.
+type DayTick struct {
+	HabitID int64
+	Day     time.Time
+}
+
+// TicksForPerson returns a person's ticks on the days from..to, inclusive.
+//
+// tick_date holds either "2026-08-24" or, on rows the Laravel app wrote,
+// "2026-08-24 00:00:00". Comparing as text against a half-open range catches
+// both: the longer form sorts after the plain day and before the next one.
+func (s *Store) TicksForPerson(ctx context.Context, personID int64, from, to time.Time) ([]DayTick, error) {
 	rows, err := s.q.QueryContext(ctx,
 		`SELECT t.habit_id, t.tick_date
-		   FROM ticks t
-		   JOIN habits h ON h.id = t.habit_id
-		  WHERE h.sprint_participant_id = ? AND h.deleted_at IS NULL`,
-		participantID,
+		   FROM habits h
+		   JOIN ticks t ON t.habit_id = h.id
+		  WHERE h.person_id = ? AND t.tick_date >= ? AND t.tick_date < ?`,
+		personID, db.FormatDate(from), db.FormatDate(to.AddDate(0, 0, 1)),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("list ticks for participant %d: %w", participantID, err)
+		return nil, fmt.Errorf("list ticks for person %d: %w", personID, err)
 	}
 	defer rows.Close()
 
-	byHabit := make(map[int64]map[string]bool)
+	ticks := make([]DayTick, 0, 64)
 	for rows.Next() {
 		var (
-			habitID  int64
-			tickDate sql.NullString
+			tick DayTick
+			raw  sql.NullString
 		)
 
-		if err := rows.Scan(&habitID, &tickDate); err != nil {
+		if err := rows.Scan(&tick.HabitID, &raw); err != nil {
 			return nil, fmt.Errorf("scan tick: %w", err)
 		}
 
-		parsed, err := db.ScanDate(tickDate)
-		if err != nil {
-			return nil, fmt.Errorf("tick date on habit %d: %w", habitID, err)
+		if tick.Day, err = db.ScanDate(raw); err != nil {
+			return nil, fmt.Errorf("tick date on habit %d: %w", tick.HabitID, err)
 		}
 
-		if byHabit[habitID] == nil {
-			byHabit[habitID] = make(map[string]bool)
-		}
-
-		byHabit[habitID][db.FormatDate(parsed)] = true
+		ticks = append(ticks, tick)
 	}
 
-	return byHabit, rows.Err()
+	return ticks, rows.Err()
+}
+
+// TickCountsOn returns how many ticks each person has on one day.
+func (s *Store) TickCountsOn(ctx context.Context, day time.Time) (map[int64]int, error) {
+	rows, err := s.q.QueryContext(ctx,
+		`SELECT h.person_id, COUNT(*)
+		   FROM ticks t
+		   JOIN habits h ON h.id = t.habit_id
+		  WHERE t.tick_date >= ? AND t.tick_date < ? AND h.person_id IS NOT NULL
+		  GROUP BY h.person_id`,
+		db.FormatDate(day), db.FormatDate(day.AddDate(0, 0, 1)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("count ticks on %s: %w", db.FormatDate(day), err)
+	}
+	defer rows.Close()
+
+	counts := make(map[int64]int, 4)
+	for rows.Next() {
+		var personID int64
+		var count int
+
+		if err := rows.Scan(&personID, &count); err != nil {
+			return nil, fmt.Errorf("scan tick count: %w", err)
+		}
+
+		counts[personID] = count
+	}
+
+	return counts, rows.Err()
+}
+
+// TickCountsByHabit returns how many ticks each of a person's habits has ever
+// had.
+func (s *Store) TickCountsByHabit(ctx context.Context, personID int64) (map[int64]int, error) {
+	rows, err := s.q.QueryContext(ctx,
+		`SELECT h.id, COUNT(t.id)
+		   FROM habits h
+		   JOIN ticks t ON t.habit_id = h.id
+		  WHERE h.person_id = ?
+		  GROUP BY h.id`,
+		personID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("count ticks by habit for person %d: %w", personID, err)
+	}
+	defer rows.Close()
+
+	counts := make(map[int64]int, 16)
+	for rows.Next() {
+		var habitID int64
+		var count int
+
+		if err := rows.Scan(&habitID, &count); err != nil {
+			return nil, fmt.Errorf("scan habit tick count: %w", err)
+		}
+
+		counts[habitID] = count
+	}
+
+	return counts, rows.Err()
 }
 
 // HasTick reports whether a habit is already ticked on a day.
@@ -243,6 +322,19 @@ func (s *Store) DeleteTick(ctx context.Context, habitID int64, day time.Time) er
 	)
 	if err != nil {
 		return fmt.Errorf("delete tick on habit %d: %w", habitID, err)
+	}
+
+	return nil
+}
+
+// ResumeHabit clears a habit's end date, so it runs again with no gap.
+func (s *Store) ResumeHabit(ctx context.Context, id int64) error {
+	_, err := s.q.ExecContext(ctx,
+		`UPDATE habits SET end_date = NULL, updated_at = ? WHERE id = ?`,
+		db.FormatTime(s.Now()), id,
+	)
+	if err != nil {
+		return fmt.Errorf("resume habit %d: %w", id, err)
 	}
 
 	return nil

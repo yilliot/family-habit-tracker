@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 
 	"github.com/el/family-habit-tracker/internal/domain"
 	"github.com/el/family-habit-tracker/internal/store"
@@ -32,9 +33,9 @@ func (s *Service) CreatePerson(ctx context.Context, name string, displayOrder *i
 	return s.store.CreatePerson(ctx, cleanName, order)
 }
 
-// UpdatePerson renames a family member and sets their position in the ledger.
-func (s *Service) UpdatePerson(ctx context.Context, id int64, name string, displayOrder int) (domain.Person, error) {
-	person, err := s.store.PersonWithTrashed(ctx, id)
+// RenamePerson changes a family member's name.
+func (s *Service) RenamePerson(ctx context.Context, id int64, name string) (domain.Person, error) {
+	person, err := s.anyPerson(ctx, id)
 	if err != nil {
 		return domain.Person{}, err
 	}
@@ -42,63 +43,79 @@ func (s *Service) UpdatePerson(ctx context.Context, id int64, name string, displ
 	validator := &domain.Validator{}
 	cleanName := validator.Name("name", name, domain.MaxPersonNameLen)
 
-	if displayOrder < 0 {
-		validator.Add("display_order", "Order cannot be negative.")
-	}
-
 	if err := validator.Err(); err != nil {
 		return domain.Person{}, err
 	}
 
-	if err := s.store.UpdatePerson(ctx, person.ID, cleanName, displayOrder); err != nil {
+	if err := s.store.UpdatePerson(ctx, person.ID, cleanName, person.DisplayOrder); err != nil {
 		return domain.Person{}, err
 	}
 
 	return s.store.PersonWithTrashed(ctx, person.ID)
 }
 
-// ArchivePerson removes a family member from the ledger without destroying any
-// of their history.
-//
-// If they are mid-sprint their habits are archived, which takes them off the
-// grid, but the enrolment row itself is kept. That row is the only link from a
-// tick back to a person: ticks belong to habits, and habits reach a person only
-// through it. Deleting it would set habits.sprint_participant_id to NULL and
-// silently orphan every point they had earned, which is exactly what the
-// implementation this replaces did — it archived the habits to "preserve the
-// ticks", then dropped the row that made those ticks findable.
-//
-// Keeping the row costs nothing: an archived person is filtered out of the
-// active grid, so they disappear from the tablet either way.
-func (s *Service) ArchivePerson(ctx context.Context, id int64) error {
-	person, err := s.store.Person(ctx, id)
+// MovePerson moves a family member one place up (−1) or down (+1) the list.
+func (s *Service) MovePerson(ctx context.Context, id int64, delta int) error {
+	person, err := s.livePerson(ctx, id)
 	if err != nil {
-		if err == store.ErrNotFound {
-			return domain.Invalid("person", "That person is already archived.")
-		}
+		return err
+	}
 
+	people, err := s.store.People(ctx)
+	if err != nil {
 		return err
 	}
 
 	return s.store.Tx(ctx, func(tx *store.Store) error {
-		sprint, err := tx.ActiveSprint(ctx)
-		if err != nil {
-			return err
-		}
+		for index, p := range reorder(people, person.ID, delta, func(p domain.Person) int64 { return p.ID }) {
+			if p.DisplayOrder == index+1 {
+				continue
+			}
 
-		if sprint != nil {
-			participant, err := tx.ParticipantForPerson(ctx, sprint.ID, person.ID)
-			if err != nil {
+			if err := tx.SetPersonOrder(ctx, p.ID, index+1); err != nil {
 				return err
 			}
-
-			if participant != nil {
-				if err := tx.SoftDeleteHabitsForParticipant(ctx, participant.ID); err != nil {
-					return err
-				}
-			}
 		}
 
-		return tx.SoftDeletePerson(ctx, person.ID)
+		return nil
 	})
+}
+
+// ArchivePerson takes a family member off the list without destroying any of
+// their history. Their habits, ticks, goals and points are all kept, and
+// restoring them brings everything back as it was.
+func (s *Service) ArchivePerson(ctx context.Context, id int64) error {
+	person, err := s.store.Person(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
+		return domain.Invalid("person", "That person is already archived.")
+	}
+	if err != nil {
+		return err
+	}
+
+	return s.store.SoftDeletePerson(ctx, person.ID)
+}
+
+// RestorePerson brings an archived family member back onto the list.
+func (s *Service) RestorePerson(ctx context.Context, id int64) error {
+	person, err := s.anyPerson(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	if !person.IsArchived() {
+		return domain.Invalid("person", person.Name+" is already on the list.")
+	}
+
+	return s.store.RestorePerson(ctx, person.ID)
+}
+
+// anyPerson loads a family member whether or not they are archived.
+func (s *Service) anyPerson(ctx context.Context, id int64) (domain.Person, error) {
+	person, err := s.store.PersonWithTrashed(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
+		return domain.Person{}, domain.Invalid("person", "That person no longer exists.")
+	}
+
+	return person, err
 }
